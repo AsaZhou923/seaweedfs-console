@@ -13,7 +13,7 @@ SENSITIVE_FIELDS = {"password", "adminpassword", "secretaccesskey", "awssecretac
                     "accesskeyid", "awsaccesskeyid", "sessiontoken", "awssessiontoken"}
 REQUIRED = {"frontend/dist/index.html", "backend/console/vendor/seaweed_mount_pb2.py",
             "backend/console/management_conditions.py", "backend/requirements.txt", "README.md",
-            "README.zh-CN.md"}
+            "README.zh-CN.md", "LICENSE", "NOTICE"}
 PRIVATE_FILE_NAMES = {".env", "secrets.json", "credentials.json"}
 PRIVATE_SUFFIXES = {".db", ".pyc", ".pem", ".key", ".pfx"}
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")

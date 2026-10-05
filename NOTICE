@@ -1,0 +1,17 @@
+SeaweedFS Console
+Copyright 2026 AsaZhou923 and SeaweedFS Console contributors
+
+Original project code is licensed under the Apache License, Version 2.0.
+Third-party components retain their respective copyright and license terms.
+
+The Mount protocol definition and generated Python files under
+backend/console/vendor/ are derived from SeaweedFS:
+https://github.com/seaweedfs/seaweedfs
+Source baseline: 530be3e37337488ecc34d58441e0bc476e121c93 (SeaweedFS 4.48)
+Copyright 2025 Chris Lu
+Licensed under the Apache License, Version 2.0.
+The upstream license is preserved in
+backend/console/vendor/SEAWEEDFS-LICENSE.txt.
+
+SeaweedFS Console is an independent third-party project, not the official
+SeaweedFS Admin UI.

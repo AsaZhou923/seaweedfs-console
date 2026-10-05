@@ -10,7 +10,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = {"node_modules", "__pycache__", ".pytest_cache", ".venv", ".omx", "data", "output", "test-results"}
 PRIVATE_NAMES = {".env", "secrets.json", "credentials.json"}
-ROOT_FILES = ("README.md", "README.zh-CN.md", "DESIGN.md", ".gitignore", ".env.example", "secrets.example.json")
+ROOT_FILES = ("README.md", "README.zh-CN.md", "LICENSE", "NOTICE", "AGENTS.md", "DESIGN.md", ".gitignore", ".env.example", "secrets.example.json")
 PAYLOAD_DIRECTORIES = ("backend", "frontend", "scripts", "docs")
 
 

@@ -44,6 +44,8 @@ def minimal_payload(**extra: bytes) -> dict[str, bytes]:
         "backend/requirements.txt": b"fastapi\n",
         "README.md": b"Languages: English | [zh](README.zh-CN.md)\n",
         "README.zh-CN.md": b"[English](README.md)\n",
+        "LICENSE": b"Synthetic license fixture\n",
+        "NOTICE": b"Synthetic attribution fixture\n",
     }
     payload.update(extra)
     return payload
@@ -56,8 +58,11 @@ def write_packaging_fixture(root: Path) -> None:
         "backend/console/management_conditions.py": "# conditions\n",
         "backend/requirements.txt": "fastapi\n",
         "scripts/start.ps1": "Write-Output start\n",
-        "README.md": "Languages: English | [zh](README.zh-CN.md)\n",
+        "README.md": "Languages: English | [zh](README.zh-CN.md)\n[License](LICENSE) [Notice](NOTICE) [Guidelines](AGENTS.md)\n",
         "README.zh-CN.md": "[English](README.md)\n",
+        "LICENSE": "Synthetic license fixture\n",
+        "NOTICE": "Synthetic attribution fixture\n",
+        "AGENTS.md": "# Synthetic project guidelines\n",
     }.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +77,7 @@ def run_package_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_package_builder_includes_bilingual_readme(tmp_path: Path):
+def test_package_builder_includes_bilingual_readme_and_license_notices(tmp_path: Path):
     package_script = load_script("package.py")
     write_packaging_fixture(tmp_path)
 
@@ -82,6 +87,20 @@ def test_package_builder_includes_bilingual_readme(tmp_path: Path):
         names = set(archive.namelist())
     assert "seaweedfs-console/README.md" in names
     assert "seaweedfs-console/README.zh-CN.md" in names
+    assert "seaweedfs-console/LICENSE" in names
+    assert "seaweedfs-console/NOTICE" in names
+    assert "seaweedfs-console/AGENTS.md" in names
+
+
+@pytest.mark.parametrize("missing", ["LICENSE", "NOTICE"])
+def test_package_verifier_rejects_missing_license_notices(tmp_path: Path, missing: str):
+    verifier = load_script("verify_package.py")
+    payload = minimal_payload()
+    del payload[missing]
+    package = write_package(tmp_path, payload)
+
+    with pytest.raises(verifier.PackageVerificationError, match="missing required runtime files"):
+        verifier.verify_package(package, tmp_path, env={})
 
 
 def test_package_cli_help_and_parse_errors_do_not_write_outputs(tmp_path: Path):
