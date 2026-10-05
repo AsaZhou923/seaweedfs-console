@@ -1,6 +1,0 @@
-[      61ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:61774/api/v1/auth/me:0
-[    2587ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:61774/api/v1/auth/me:0
-[    2621ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:61774/api/v1/auth/me:0
-[    2684ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:61774/api/v1/auth/me:0
-[    2724ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:61774/api/v1/auth/login:0
-[    4776ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:61774/api/v1/management/connections:0

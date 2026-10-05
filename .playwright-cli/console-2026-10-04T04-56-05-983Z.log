@@ -1,6 +1,0 @@
-[      73ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:18765/api/v1/auth/me:0
-[   79246ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:18765/api/v1/scopes/scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6/assets/ast_bOunmEJinsHTKvRK_Lkp9h6_CfwhUVvc:0
-[  136561ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:18765/api/v1/jobs?scope_id=scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6:0
-[  176568ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:18765/api/v1/jobs?scope_id=scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6:0
-[  181560ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:18765/api/v1/jobs?scope_id=scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6:0
-[  186566ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:18765/api/v1/jobs?scope_id=scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6:0

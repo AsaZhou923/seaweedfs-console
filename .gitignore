@@ -12,3 +12,5 @@ secrets.json
 test-results/
 output/
 .omx/
+.playwright-cli/
+/\[A-Za-z\]
