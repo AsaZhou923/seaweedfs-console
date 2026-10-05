@@ -1,0 +1,167 @@
+- generic [ref=e12]:
+  - complementary [ref=e13]:
+    - generic [ref=e20]:
+      - strong [ref=e21]: SeaweedFS Console
+      - text: Image workbench
+    - navigation [ref=e22]:
+      - link "资产" [ref=e23] [cursor=pointer]:
+        - /url: "#assets"
+      - link "任务" [ref=e28] [cursor=pointer]:
+        - /url: "#scans"
+      - link "诊断" [ref=e31] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "操作" [ref=e35] [cursor=pointer]:
+        - /url: "#operations"
+      - link "规格" [ref=e41] [cursor=pointer]:
+        - /url: "#presets"
+      - link "设置" [ref=e45] [cursor=pointer]:
+        - /url: "#settings"
+    - button "退出" [ref=e49] [cursor=pointer]
+  - main [ref=e50]:
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - paragraph [ref=e53]: 服务器测试图库 · 专用测试样本
+        - heading "资产检索" [level=1] [ref=e54]
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - text: 项目
+          - combobox "项目" [ref=e57]:
+            - option "服务器测试图库" [selected]
+        - generic [ref=e58]:
+          - text: Scope
+          - combobox "Scope" [ref=e59]:
+            - option "未选择"
+            - option "专用测试样本" [selected]
+        - generic [ref=e60]: swc-integration-ui-2776d1a3/gallery/
+    - generic [ref=e61]:
+      - generic [ref=e62]:
+        - textbox "key 查询" [ref=e63]
+        - textbox "prefix" [ref=e64]
+        - combobox [ref=e65]:
+          - option "格式" [selected]
+          - option "JPEG"
+          - option "PNG"
+          - option "WebP"
+        - combobox [ref=e66]:
+          - option "解码状态" [selected]
+          - option "valid"
+          - option "unsupported"
+          - option "corrupt"
+          - option "resource_limited"
+          - option "unknown"
+        - button "下载报告" [ref=e67] [cursor=pointer]
+        - group [ref=e68]:
+          - generic "高级筛选" [ref=e69] [cursor=pointer]
+          - option "presence" [selected]
+          - option "present"
+          - option "missing_candidate"
+          - option "missing_confirmed"
+      - generic [ref=e70]:
+        - button "提交预览任务" [ref=e71] [cursor=pointer]
+        - button "固定选择/查询快照" [ref=e72] [cursor=pointer]
+        - button "批量复制" [disabled] [ref=e73]
+        - button "生成派生" [disabled] [ref=e74]
+        - button "刷新重复与容量" [ref=e75] [cursor=pointer]
+        - generic "显示模式" [ref=e76]:
+          - button "网格" [ref=e77] [cursor=pointer]
+          - button "列表" [ref=e78] [cursor=pointer]
+      - generic [ref=e79]:
+        - button "打开对象详情 gallery/sample-06.jpg" [ref=e80] [cursor=pointer]:
+          - checkbox [ref=e82]
+          - generic [ref=e85]:
+            - strong [ref=e86]: gallery/sample-06.jpg
+            - paragraph [ref=e87]: jpeg · 640×480 · 6.9 KiB
+            - generic [ref=e88]: unknown · observed:f0f2f681e
+        - button "打开对象详情 gallery/sample-05.jpg" [ref=e89] [cursor=pointer]:
+          - checkbox [ref=e91]
+          - generic [ref=e94]:
+            - strong [ref=e95]: gallery/sample-05.jpg
+            - paragraph [ref=e96]: jpeg · 640×480 · 7.8 KiB
+            - generic [ref=e97]: unknown · observed:4d851eace
+        - button "打开对象详情 gallery/sample-04.jpg" [ref=e98] [cursor=pointer]:
+          - checkbox [ref=e100]
+          - generic [ref=e103]:
+            - strong [ref=e104]: gallery/sample-04.jpg
+            - paragraph [ref=e105]: jpeg · 640×480 · 7.8 KiB
+            - generic [ref=e106]: unknown · observed:7f8ca91e3
+        - button "打开对象详情 gallery/sample-03.jpg" [ref=e107] [cursor=pointer]:
+          - checkbox [ref=e109]
+          - generic [ref=e112]:
+            - strong [ref=e113]: gallery/sample-03.jpg
+            - paragraph [ref=e114]: jpeg · 640×480 · 7.4 KiB
+            - generic [ref=e115]: unknown · observed:9705de0b6
+        - button "打开对象详情 gallery/sample-02.jpg" [ref=e116] [cursor=pointer]:
+          - checkbox [ref=e118]
+          - generic [ref=e121]:
+            - strong [ref=e122]: gallery/sample-02.jpg
+            - paragraph [ref=e123]: jpeg · 640×480 · 7.4 KiB
+            - generic [ref=e124]: unknown · observed:d84750972
+        - button "打开对象详情 gallery/sample-01.jpg" [ref=e125] [cursor=pointer]:
+          - checkbox [ref=e127]
+          - generic [ref=e130]:
+            - strong [ref=e131]: gallery/sample-01.jpg
+            - paragraph [ref=e132]: jpeg · 640×480 · 8.0 KiB
+            - generic [ref=e133]: unknown · observed:7d3e89ce0
+      - generic [ref=e134]:
+        - region "任务" [ref=e135]:
+          - heading "任务" [level=2] [ref=e137]
+          - table [ref=e140]:
+            - caption [ref=e141]: 最近任务
+            - rowgroup [ref=e142]:
+              - row [ref=e143]:
+                - columnheader "类型" [ref=e144]
+                - columnheader "状态" [ref=e145]
+                - columnheader "进度" [ref=e146]
+                - columnheader "错误" [ref=e147]
+                - columnheader "控制" [ref=e148]
+                - columnheader "更新时间" [ref=e149]
+            - rowgroup [ref=e150]:
+              - row [ref=e151]:
+                - cell [ref=e152]:
+                  - code [ref=e153]: preview
+                - cell "成功" [ref=e154]
+                - cell "6 / 未知" [ref=e156]
+                - cell "0" [ref=e157]
+                - cell "none" [ref=e158]
+                - cell "2026-10-04T04:26:18.247156Z" [ref=e159]
+              - row [ref=e160]:
+                - cell [ref=e161]:
+                  - code [ref=e162]: scan
+                - cell "成功" [ref=e163]
+                - cell "6 / 未知" [ref=e165]
+                - cell "0" [ref=e166]
+                - cell "none" [ref=e167]
+                - cell "2026-10-04T04:24:51.783799Z" [ref=e168]
+              - row [ref=e169]:
+                - cell [ref=e170]:
+                  - code [ref=e171]: preview
+                - cell "部分失败" [ref=e172]
+                - cell "6 / 未知" [ref=e174]
+                - cell "6" [ref=e175]
+                - cell "none" [ref=e176]
+                - cell "2026-10-04T04:21:47.276052Z" [ref=e177]
+              - row [ref=e178]:
+                - cell [ref=e179]:
+                  - code [ref=e180]: scan
+                - cell "部分失败" [ref=e181]
+                - cell "6 / 未知" [ref=e183]
+                - cell "6" [ref=e184]
+                - cell "none" [ref=e185]
+                - cell "2026-10-04T04:21:46.213178Z" [ref=e186]
+          - group [ref=e187]:
+            - generic "Raw API evidence" [ref=e188] [cursor=pointer]
+        - region "重复/容量" [ref=e189]:
+          - heading "重复/容量" [level=2] [ref=e191]
+          - generic [ref=e192]:
+            - generic [ref=e193]:
+              - heading "容量" [level=3] [ref=e194]
+              - generic [ref=e196]:
+                - term [ref=e197]: 结果
+                - definition [ref=e198]: 未测
+            - generic [ref=e199]:
+              - heading "重复候选" [level=3] [ref=e200]
+              - generic [ref=e202]:
+                - term [ref=e203]: 结果
+                - definition [ref=e204]: 未测
+          - group [ref=e205]:
+            - generic "Raw API evidence" [ref=e206] [cursor=pointer]

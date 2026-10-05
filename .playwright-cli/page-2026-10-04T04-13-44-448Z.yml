@@ -1,0 +1,113 @@
+- generic [ref=f3e12]:
+  - complementary [ref=f3e13]:
+    - generic [ref=f3e14]:
+      - generic [ref=f3e15]: S
+      - generic [ref=f3e16]:
+        - strong [ref=f3e17]: SeaweedFS Console
+        - text: 图片资产技术工作台
+    - generic [ref=f3e18]:
+      - text: 项目
+      - combobox "项目" [ref=f3e19]:
+        - option "Images" [selected]
+    - generic [ref=f3e20]:
+      - text: Scope
+      - combobox "Scope" [ref=f3e21]:
+        - option "未选择" [selected]
+    - navigation [ref=f3e22]:
+      - link "▦ 资产" [ref=f3e23] [cursor=pointer]:
+        - /url: "#assets"
+        - generic [ref=f3e24]: ▦
+        - text: 资产
+      - link "↻ 任务" [ref=f3e25] [cursor=pointer]:
+        - /url: "#scans"
+        - generic [ref=f3e26]: ↻
+        - text: 任务
+      - link "◇ 诊断" [ref=f3e27] [cursor=pointer]:
+        - /url: "#diagnostics"
+        - generic [ref=f3e28]: ◇
+        - text: 诊断
+      - link "⇄ 操作" [ref=f3e29] [cursor=pointer]:
+        - /url: "#operations"
+        - generic [ref=f3e30]: ⇄
+        - text: 操作
+      - link "◫ 规格" [ref=f3e31] [cursor=pointer]:
+        - /url: "#presets"
+        - generic [ref=f3e32]: ◫
+        - text: 规格
+      - link "⚙ 设置" [ref=f3e33] [cursor=pointer]:
+        - /url: "#settings"
+        - generic [ref=f3e34]: ⚙
+        - text: 设置
+    - button "退出" [ref=f3e35] [cursor=pointer]
+  - main [ref=f3e36]:
+    - generic [ref=f3e37]:
+      - generic [ref=f3e38]:
+        - paragraph [ref=f3e39]: Images · no-scope
+        - heading "设置向导" [level=1] [ref=f3e64]
+      - generic [ref=f3e41]: authz:unknown
+    - generic [ref=f3e65]:
+      - generic [ref=f3e66]:
+        - heading "连接" [level=2] [ref=f3e67]
+        - generic [ref=f3e68]:
+          - text: 名称
+          - textbox "名称" [ref=f3e69]: SeaweedFS test
+        - generic [ref=f3e70]:
+          - text: Endpoint
+          - textbox "Endpoint" [ref=f3e71]: http://127.0.0.1:8333
+        - generic [ref=f3e72]:
+          - text: Secret Ref
+          - textbox "Secret Ref" [ref=f3e73]: server-test
+        - generic [ref=f3e74]:
+          - text: Region
+          - textbox "Region" [ref=f3e75]: us-east-1
+        - generic [ref=f3e76]:
+          - checkbox "校验 TLS" [ref=f3e77]
+          - text: 校验 TLS
+        - button "添加连接" [ref=f3e78] [cursor=pointer]
+        - generic [ref=f3e79]: 暂无记录。
+      - generic [ref=f3e80]:
+        - heading "项目" [level=2] [ref=f3e81]
+        - generic [ref=f3e82]:
+          - text: Key
+          - textbox "Key" [ref=f3e83]: images
+        - generic [ref=f3e84]:
+          - text: 名称
+          - textbox "名称" [ref=f3e85]: Images
+        - button "添加项目" [active] [ref=f3e86] [cursor=pointer]
+        - table [ref=f3e110]:
+          - rowgroup [ref=f3e111]:
+            - row [ref=f3e112]:
+              - columnheader "Key" [ref=f3e113]
+              - columnheader "名称" [ref=f3e114]
+          - rowgroup [ref=f3e115]:
+            - row [ref=f3e116]:
+              - cell "prj_Q5HSEQuOQHo2Id8CtkbZVzxxL1C3M0TK" [ref=f3e117]
+              - cell "Images" [ref=f3e118]
+      - generic [ref=f3e88]:
+        - heading "Scope" [level=2] [ref=f3e89]
+        - generic [ref=f3e90]:
+          - text: 连接
+          - combobox "连接" [ref=f3e91]
+        - generic [ref=f3e92]:
+          - text: 显示名
+          - textbox "显示名" [ref=f3e93]: Images scope
+        - generic [ref=f3e94]:
+          - text: Bucket
+          - textbox "Bucket" [ref=f3e95]: archive
+        - generic [ref=f3e96]:
+          - text: Prefix
+          - textbox "Prefix" [ref=f3e97]
+        - generic [ref=f3e98]:
+          - checkbox "允许预览" [checked] [ref=f3e99]
+          - text: 允许预览
+        - generic [ref=f3e100]:
+          - checkbox "允许原图下载" [checked] [ref=f3e101]
+          - text: 允许原图下载
+        - generic [ref=f3e102]:
+          - checkbox "可写 scope" [ref=f3e103]
+          - text: 可写 scope
+        - generic [ref=f3e104]:
+          - checkbox "管理桶配置" [ref=f3e105]
+          - text: 管理桶配置
+        - button "添加范围" [disabled] [ref=f3e106]
+        - paragraph [ref=f3e107]: Secret Ref 只保存服务端引用；前端不会接收或展示密钥。

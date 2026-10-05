@@ -1,0 +1,160 @@
+- generic [ref=e12]:
+  - complementary [ref=e13]:
+    - generic [ref=e20]:
+      - strong [ref=e21]: SeaweedFS Console
+      - text: Image workbench
+    - navigation [ref=e22]:
+      - link "资产" [active] [ref=e23] [cursor=pointer]:
+        - /url: "#assets"
+      - link "任务" [ref=e28] [cursor=pointer]:
+        - /url: "#scans"
+      - link "诊断" [ref=e31] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "操作" [ref=e35] [cursor=pointer]:
+        - /url: "#operations"
+      - link "规格" [ref=e41] [cursor=pointer]:
+        - /url: "#presets"
+      - link "设置" [ref=e45] [cursor=pointer]:
+        - /url: "#settings"
+    - button "退出" [ref=e49] [cursor=pointer]
+  - main [ref=e50]:
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - paragraph [ref=e53]: 服务器测试图库 · 专用测试样本
+        - heading "资产检索" [level=1] [ref=e193]
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - text: 项目
+          - combobox "项目" [ref=e57]:
+            - option "服务器测试图库" [selected]
+        - generic [ref=e58]:
+          - text: Scope
+          - combobox "Scope" [ref=e59]:
+            - option "未选择"
+            - option "专用测试样本" [selected]
+        - generic [ref=e60]: swc-integration-ui-2776d1a3/gallery/
+    - generic [ref=e194]:
+      - generic [ref=e195]:
+        - textbox "key 查询" [ref=e196]
+        - textbox "prefix" [ref=e197]
+        - combobox [ref=e198]:
+          - option "格式" [selected]
+          - option "JPEG"
+          - option "PNG"
+          - option "WebP"
+        - combobox [ref=e199]:
+          - option "解码状态" [selected]
+          - option "valid"
+          - option "unsupported"
+          - option "corrupt"
+          - option "resource_limited"
+          - option "unknown"
+        - button "下载报告" [ref=e200] [cursor=pointer]
+        - group [ref=e201]:
+          - generic "高级筛选" [ref=e202] [cursor=pointer]
+          - option "presence" [selected]
+          - option "present"
+          - option "missing_candidate"
+          - option "missing_confirmed"
+      - generic [ref=e203]:
+        - button "提交预览任务" [ref=e204] [cursor=pointer]
+        - button "固定选择/查询快照" [ref=e205] [cursor=pointer]
+        - button "生成派生" [disabled] [ref=e206]
+        - button "刷新重复与容量" [ref=e207] [cursor=pointer]
+        - generic "显示模式" [ref=e208]:
+          - button "网格" [ref=e209] [cursor=pointer]
+          - button "列表" [ref=e210] [cursor=pointer]
+      - generic [ref=e211]:
+        - button "打开对象详情 gallery/sample-06.jpg" [ref=e212] [cursor=pointer]:
+          - checkbox [ref=e214]
+          - generic [ref=e217]:
+            - strong [ref=e218]: gallery/sample-06.jpg
+            - paragraph [ref=e219]: jpeg · 640×480 · 6.9 KiB
+            - generic [ref=e220]: unknown · observed:f0f2f681e
+        - button "打开对象详情 gallery/sample-05.jpg" [ref=e221] [cursor=pointer]:
+          - checkbox [ref=e223]
+          - generic [ref=e226]:
+            - strong [ref=e227]: gallery/sample-05.jpg
+            - paragraph [ref=e228]: jpeg · 640×480 · 7.8 KiB
+            - generic [ref=e229]: unknown · observed:4d851eace
+        - button "打开对象详情 gallery/sample-04.jpg" [ref=e230] [cursor=pointer]:
+          - checkbox [ref=e232]
+          - generic [ref=e235]:
+            - strong [ref=e236]: gallery/sample-04.jpg
+            - paragraph [ref=e237]: jpeg · 640×480 · 7.8 KiB
+            - generic [ref=e238]: unknown · observed:7f8ca91e3
+        - button "打开对象详情 gallery/sample-03.jpg" [ref=e239] [cursor=pointer]:
+          - checkbox [ref=e241]
+          - generic [ref=e244]:
+            - strong [ref=e245]: gallery/sample-03.jpg
+            - paragraph [ref=e246]: jpeg · 640×480 · 7.4 KiB
+            - generic [ref=e247]: unknown · observed:9705de0b6
+        - button "打开对象详情 gallery/sample-02.jpg" [ref=e248] [cursor=pointer]:
+          - checkbox [ref=e250]
+          - generic [ref=e253]:
+            - strong [ref=e254]: gallery/sample-02.jpg
+            - paragraph [ref=e255]: jpeg · 640×480 · 7.4 KiB
+            - generic [ref=e256]: unknown · observed:d84750972
+        - button "打开对象详情 gallery/sample-01.jpg" [ref=e257] [cursor=pointer]:
+          - checkbox [ref=e259]
+          - generic [ref=e262]:
+            - strong [ref=e263]: gallery/sample-01.jpg
+            - paragraph [ref=e264]: jpeg · 640×480 · 8.0 KiB
+            - generic [ref=e265]: unknown · observed:7d3e89ce0
+      - generic [ref=e266]:
+        - generic [ref=e267]:
+          - heading "任务" [level=2] [ref=e268]
+          - generic [ref=e269]:
+            - table [ref=e271]:
+              - rowgroup [ref=e272]:
+                - row [ref=e273]:
+                  - columnheader "kind" [ref=e274]
+                  - columnheader "state" [ref=e275]
+                  - columnheader "processed" [ref=e276]
+                  - columnheader "errors" [ref=e277]
+                  - columnheader "total" [ref=e278]
+              - rowgroup [ref=e279]:
+                - row [ref=e280]:
+                  - cell "preview" [ref=e281]
+                  - cell "succeeded" [ref=e282]
+                  - cell "6" [ref=e283]
+                  - cell "0" [ref=e284]
+                  - cell "unknown" [ref=e285]
+                - row [ref=e286]:
+                  - cell "scan" [ref=e287]
+                  - cell "succeeded" [ref=e288]
+                  - cell "6" [ref=e289]
+                  - cell "0" [ref=e290]
+                  - cell "unknown" [ref=e291]
+                - row [ref=e292]:
+                  - cell "preview" [ref=e293]
+                  - cell "partially_failed" [ref=e294]
+                  - cell "6" [ref=e295]
+                  - cell "6" [ref=e296]
+                  - cell "unknown" [ref=e297]
+                - row [ref=e298]:
+                  - cell "scan" [ref=e299]
+                  - cell "partially_failed" [ref=e300]
+                  - cell "6" [ref=e301]
+                  - cell "6" [ref=e302]
+                  - cell "unknown" [ref=e303]
+            - group [ref=e304]:
+              - generic "任务 raw evidence" [ref=e305] [cursor=pointer]
+        - generic [ref=e306]:
+          - heading "重复/容量" [level=2] [ref=e307]
+          - generic [ref=e308]:
+            - generic [ref=e309]:
+              - generic [ref=e310]:
+                - generic [ref=e311]: 重复组
+                - strong [ref=e312]: unknown
+              - generic [ref=e313]:
+                - generic [ref=e314]: 容量对象
+                - strong [ref=e315]: unknown
+              - generic [ref=e316]:
+                - generic [ref=e317]: 逻辑字节
+                - strong [ref=e318]: unknown
+              - generic [ref=e319]:
+                - generic [ref=e320]: 引用状态
+                - strong [ref=e321]: unknown
+            - group [ref=e322]:
+              - generic "重复/容量 raw evidence" [ref=e323] [cursor=pointer]

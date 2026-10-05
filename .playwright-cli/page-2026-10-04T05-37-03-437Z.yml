@@ -1,0 +1,95 @@
+- generic [ref=e12]:
+  - complementary [ref=e13]:
+    - generic [ref=e20]:
+      - strong [ref=e21]: SeaweedFS Console
+      - text: Image workbench
+    - navigation [ref=e22]:
+      - link "资产" [ref=e23] [cursor=pointer]:
+        - /url: "#assets"
+      - link "任务" [ref=e28] [cursor=pointer]:
+        - /url: "#scans"
+      - link "诊断" [ref=e31] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "操作" [ref=e35] [cursor=pointer]:
+        - /url: "#operations"
+      - link "规格" [ref=e41] [cursor=pointer]:
+        - /url: "#presets"
+      - link "设置" [ref=e45] [cursor=pointer]:
+        - /url: "#settings"
+    - button "退出" [ref=e49] [cursor=pointer]
+  - main [ref=e50]:
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - paragraph [ref=e53]: 服务器测试图库 · 专用测试样本
+        - heading "受控操作" [level=1] [ref=e366]
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - text: 项目
+          - combobox "项目" [ref=e57]:
+            - option "服务器测试图库" [selected]
+        - generic [ref=e58]:
+          - text: Scope
+          - combobox "Scope" [ref=e59]:
+            - option "未选择"
+            - option "专用测试样本" [selected]
+        - generic [ref=e60]: swc-integration-ui-2776d1a3/gallery/
+    - generic [ref=e367]:
+      - generic [ref=e368]:
+        - button "分片上传" [ref=e369] [cursor=pointer]
+        - button "复制/移动" [ref=e370] [cursor=pointer]
+        - button "版本/标签/保留" [ref=e371] [cursor=pointer]
+        - button "桶配置" [ref=e372] [cursor=pointer]
+        - button "引用 Manifest" [ref=e373] [cursor=pointer]
+        - button "审计/缓存/容量" [ref=e374] [cursor=pointer]
+      - generic [ref=e506]:
+        - generic [ref=e507]:
+          - heading "审计、缓存与容量" [level=2] [ref=e508]
+          - generic [ref=e509]:
+            - button "读取审计" [ref=e510] [cursor=pointer]
+            - button "执行缓存回收" [ref=e511] [cursor=pointer]
+            - button "容量趋势" [active] [ref=e512] [cursor=pointer]
+          - paragraph [ref=e513]: 容量趋势来自扫描样本和手动采样记录；物理占用、版本占用未知时显示为 unknown，不由前端估算。
+          - button "按当前索引记录容量样本" [ref=e514] [cursor=pointer]
+          - generic [ref=e515]:
+            - text: 阈值 JSON
+            - textbox "阈值 JSON" [ref=e516]: "{\"source_bytes\":10737418240}"
+          - button "检查阈值" [ref=e517] [cursor=pointer]
+          - heading "面板自有派生逻辑回收" [level=2] [ref=e518]
+          - paragraph [ref=e519]: 仅标记面板自有派生对象；后端返回 physical_delete_enabled:false 时表示不会物理删除。
+          - generic [ref=e520]:
+            - text: Variant ID
+            - textbox "Variant ID" [ref=e521]
+          - generic [ref=e522]:
+            - text: Reason
+            - textbox "Reason" [ref=e523]: manual review
+          - generic [ref=e524]:
+            - button "读取回收预览" [ref=e525] [cursor=pointer]
+            - button "标记逻辑回收" [disabled] [ref=e526]
+            - button "恢复" [disabled] [ref=e527]
+        - region "执行结果" [ref=e530]:
+          - heading "执行结果" [level=2] [ref=e532]
+          - generic [ref=e534]:
+            - generic [ref=e536]:
+              - term [ref=e537]: label
+              - definition [ref=e538]: capacity.trends
+            - table [ref=e540]:
+              - caption [ref=e541]: value
+              - rowgroup [ref=e542]:
+                - row [ref=e543]:
+                  - columnheader "名称" [ref=e544]
+                  - columnheader "值" [ref=e545]
+              - rowgroup [ref=e546]:
+                - row [ref=e569]:
+                  - cell [ref=e570]:
+                    - code [ref=e571]: items
+                  - cell "0 项" [ref=e572]
+                - row [ref=e573]:
+                  - cell [ref=e574]:
+                    - code [ref=e575]: auto_samples
+                  - cell "0 项" [ref=e576]
+                - row [ref=e577]:
+                  - cell [ref=e578]:
+                    - code [ref=e579]: manual_snapshots
+                  - cell "0 项" [ref=e580]
+          - group [ref=e551]:
+            - generic "Raw API evidence" [ref=e552] [cursor=pointer]

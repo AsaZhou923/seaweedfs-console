@@ -1,0 +1,73 @@
+- generic [ref=e12]:
+  - complementary [ref=e13]:
+    - generic [ref=e20]:
+      - strong [ref=e21]: SeaweedFS Console
+      - text: Image workbench
+    - navigation [ref=e22]:
+      - link "资产" [ref=e23] [cursor=pointer]:
+        - /url: "#assets"
+      - link "任务" [ref=e28] [cursor=pointer]:
+        - /url: "#scans"
+      - link "诊断" [ref=e31] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "操作" [active] [ref=e35] [cursor=pointer]:
+        - /url: "#operations"
+      - link "规格" [ref=e41] [cursor=pointer]:
+        - /url: "#presets"
+      - link "设置" [ref=e45] [cursor=pointer]:
+        - /url: "#settings"
+    - button "退出" [ref=e49] [cursor=pointer]
+  - main [ref=e50]:
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - paragraph [ref=e53]: 服务器测试图库 · 专用测试样本
+        - heading "受控操作" [level=1] [ref=e188]
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - text: 项目
+          - combobox "项目" [ref=e57]:
+            - option "服务器测试图库" [selected]
+        - generic [ref=e58]:
+          - text: Scope
+          - combobox "Scope" [ref=e59]:
+            - option "未选择"
+            - option "专用测试样本" [selected]
+        - generic [ref=e60]: swc-integration-ui-2776d1a3/gallery/
+    - generic [ref=e189]:
+      - generic [ref=e190]:
+        - button "分片上传" [ref=e191] [cursor=pointer]
+        - button "复制/移动" [ref=e192] [cursor=pointer]
+        - button "版本/标签/保留" [ref=e193] [cursor=pointer]
+        - button "桶配置" [ref=e194] [cursor=pointer]
+        - button "引用 Manifest" [ref=e195] [cursor=pointer]
+        - button "审计/缓存/容量" [ref=e196] [cursor=pointer]
+      - generic [ref=e197]:
+        - generic [ref=e198]:
+          - heading "multipart 上传" [level=2] [ref=e199]
+          - generic [ref=e200]:
+            - text: 目标 Key
+            - textbox "目标 Key" [ref=e201]:
+              - /placeholder: prefix/new-image.webp
+          - generic [ref=e202]:
+            - text: Metadata JSON
+            - textbox "Metadata JSON" [ref=e203]: "{}"
+          - button "初始化" [disabled] [ref=e204]
+          - generic [ref=e205]:
+            - text: Upload ID
+            - textbox "Upload ID" [ref=e206]
+          - generic [ref=e207]:
+            - text: Part Number
+            - spinbutton "Part Number" [ref=e208]: "1"
+          - generic [ref=e209]:
+            - text: Part 文件
+            - button "Part 文件" [ref=e210]
+          - generic [ref=e211]:
+            - button "上传 part" [disabled] [ref=e212]
+            - button "Complete" [disabled] [ref=e213]
+            - button "Abort" [disabled] [ref=e214]
+          - generic [ref=e215]:
+            - text: Complete parts JSON
+            - textbox "Complete parts JSON" [ref=e216]:
+              - /placeholder: "[{\"PartNumber\":1,\"ETag\":\"...\"}]"
+              - text: "[]"
+        - generic [ref=e217]: 执行结果会显示在这里；不支持或权限不足时保留后端错误码。

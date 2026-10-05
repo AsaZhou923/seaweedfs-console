@@ -1,0 +1,105 @@
+- generic [ref=e12]:
+  - complementary [ref=e13]:
+    - generic [ref=e20]:
+      - strong [ref=e21]: SeaweedFS Console
+      - text: Image workbench
+    - navigation [ref=e22]:
+      - link "资产" [ref=e23] [cursor=pointer]:
+        - /url: "#assets"
+      - link "任务" [ref=e28] [cursor=pointer]:
+        - /url: "#scans"
+      - link "诊断" [ref=e31] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "操作" [ref=e35] [cursor=pointer]:
+        - /url: "#operations"
+      - link "规格" [ref=e41] [cursor=pointer]:
+        - /url: "#presets"
+      - link "设置" [ref=e45] [cursor=pointer]:
+        - /url: "#settings"
+    - button "退出" [ref=e49] [cursor=pointer]
+  - main [ref=e50]:
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - paragraph [ref=e53]: 服务器测试图库 · 专用测试样本
+        - heading "受控操作" [level=1] [ref=e207]
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - text: 项目
+          - combobox "项目" [ref=e57]:
+            - option "服务器测试图库" [selected]
+        - generic [ref=e58]:
+          - text: Scope
+          - combobox "Scope" [ref=e59]:
+            - option "未选择"
+            - option "专用测试样本" [selected]
+        - generic [ref=e60]: swc-integration-ui-2776d1a3/gallery/
+    - generic [ref=e208]:
+      - generic [ref=e209]:
+        - button "分片上传" [ref=e210] [cursor=pointer]
+        - button "复制/移动" [ref=e211] [cursor=pointer]
+        - button "版本/标签/保留" [ref=e212] [cursor=pointer]
+        - button "桶配置" [ref=e213] [cursor=pointer]
+        - button "引用 Manifest" [ref=e214] [cursor=pointer]
+        - button "审计/缓存/容量" [ref=e215] [cursor=pointer]
+      - generic [ref=e238]:
+        - generic [ref=e239]:
+          - heading "复制对象" [level=2] [ref=e240]
+          - generic [ref=e241]:
+            - text: 源对象 ID
+            - textbox "源对象 ID" [ref=e242]
+          - generic [ref=e243]:
+            - text: 目标 Key
+            - textbox "目标 Key" [ref=e244]
+          - generic [ref=e245]:
+            - text: Metadata JSON
+            - textbox "Metadata JSON" [ref=e246]: "{}"
+          - generic [ref=e247]:
+            - button "复制并校验" [disabled] [ref=e248]
+            - button "移动源对象（受保护）" [disabled] [ref=e249]
+          - paragraph [ref=e250]: 移动需要服务端引用保护 adapter，当前 UI 明确禁用。
+          - heading "批量复制" [level=2] [ref=e251]
+          - paragraph [ref=e252]: 从资产页选择对象后可带入 object_id；目标 key 必须逐行确认。复制只创建目标对象，不删除源对象。
+          - generic [ref=e253]:
+            - button "载入当前选择" [ref=e254] [cursor=pointer]
+            - button "生成幂等 Key" [active] [ref=e255] [cursor=pointer]
+          - generic [ref=e256]:
+            - text: 目标 Scope ID
+            - textbox "目标 Scope ID" [ref=e257]: scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6
+          - generic [ref=e258]:
+            - text: 目标 Key 前缀（可选，原样拼接）
+            - textbox "目标 Key 前缀（可选，原样拼接）" [ref=e259]:
+              - /placeholder: copied/
+          - generic [ref=e260]:
+            - text: Object IDs（每行一个，最多 60）
+            - textbox "Object IDs（每行一个，最多 60）" [ref=e261]: obj_Xy2mjzofNK675hl1zb55vO95aMcKCugm
+          - generic [ref=e262]:
+            - text: 目标 Keys（每行一个，与 object_id 行号对应）
+            - textbox "目标 Keys（每行一个，与 object_id 行号对应）" [ref=e263]:
+              - /placeholder: gallery/copy-001.jpg
+              - text: gallery/copy-smoke-no-submit.jpg
+          - generic [ref=e264]:
+            - text: Idempotency-Key
+            - textbox "Idempotency-Key" [ref=e265]: 5e4885b2-3b52-40c1-9b37-39bae2360c26
+          - table [ref=e267]:
+            - rowgroup [ref=e268]:
+              - row [ref=e269]:
+                - columnheader "#" [ref=e270]
+                - columnheader "object_id" [ref=e271]
+                - columnheader "target_scope_id" [ref=e272]
+                - columnheader "target_key" [ref=e273]
+            - rowgroup [ref=e274]:
+              - row [ref=e290]:
+                - cell "1" [ref=e276]
+                - cell [ref=e277]:
+                  - code [ref=e278]: obj_Xy2mjzofNK675hl1zb55vO95aMcKCugm
+                - cell [ref=e279]:
+                  - code [ref=e280]: scp_TgGzOMqGgSIRi4MI3GZSQZcsaZfjRGf6
+                - cell [ref=e291]:
+                  - code [ref=e282]: gallery/copy-smoke-no-submit.jpg
+          - generic [ref=e283]:
+            - button "提交批量复制" [ref=e284] [cursor=pointer]
+            - generic [ref=e285]:
+              - text: Batch ID
+              - textbox "Batch ID" [ref=e286]
+            - button "读取批次详情" [disabled] [ref=e287]
+        - generic [ref=e288]: 执行结果会显示在这里；不支持或权限不足时保留后端错误码。

@@ -1,0 +1,15 @@
+- generic [ref=f3e4]:
+  - generic [ref=f3e5]: S
+  - heading "SeaweedFS Console" [level=1] [ref=f3e6]
+  - generic [ref=f3e7]:
+    - text: Username
+    - textbox "Username" [ref=f3e8]: admin
+  - generic [ref=f3e9]:
+    - text: Password
+    - textbox "Password" [ref=f3e10]
+  - generic [ref=f3e11]:
+    - text: Language
+    - combobox "Language" [ref=f3e12]:
+      - option "English" [selected]
+      - option "简体中文"
+  - button "Sign in" [ref=f3e13] [cursor=pointer]

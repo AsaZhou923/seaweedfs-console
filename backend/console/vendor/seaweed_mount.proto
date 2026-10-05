@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+// Wire-compatible readonly subset of weed/pb/filer.proto, SeaweedFS 4.48.
+// Source SHA: 530be3e37337488ecc34d58441e0bc476e121c93
+// Original field numbers and RPC service name are preserved verbatim.
+syntax = "proto3";
+package filer_pb;
+
+service SeaweedFiler {
+  rpc ListMetadataSubscribers(ListMetadataSubscribersRequest) returns (ListMetadataSubscribersResponse) {}
+}
+
+message ListMetadataSubscribersRequest {
+  repeated string client_types = 1;
+}
+message ListMetadataSubscribersResponse {
+  repeated MetadataSubscriber subscribers = 1;
+}
+message MetadataSubscriber {
+  string client_name = 1;
+  string client_type = 2;
+  string address = 3;
+  string path_prefix = 4;
+  int32 client_id = 5;
+  int32 client_epoch = 6;
+  int64 connected_at_ns = 7;
+  string filer_address = 8;
+}

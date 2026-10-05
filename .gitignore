@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+frontend/dist/
+data/
+.env
+*.db
+*.db-shm
+*.db-wal
+secrets.json
+test-results/
+output/
+.omx/

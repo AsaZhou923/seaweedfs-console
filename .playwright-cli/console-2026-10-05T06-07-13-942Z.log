@@ -1,0 +1,4 @@
+[    1140ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:62539/api/v1/scopes//objects/obj-a-1/preview:0
+[    1140ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:62539/api/v1/scopes//assets/asset-a-1:0
+[    1141ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:62539/api/v1/scopes//objects/obj-a-1/versions:0
+[    1144ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:62539/api/v1/scopes//objects/obj-a-1/preview:0

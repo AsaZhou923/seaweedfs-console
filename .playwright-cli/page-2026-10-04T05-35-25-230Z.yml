@@ -1,0 +1,87 @@
+- generic [ref=e12]:
+  - complementary [ref=e13]:
+    - generic [ref=e20]:
+      - strong [ref=e21]: SeaweedFS Console
+      - text: Image workbench
+    - navigation [ref=e22]:
+      - link "资产" [ref=e23] [cursor=pointer]:
+        - /url: "#assets"
+      - link "任务" [ref=e28] [cursor=pointer]:
+        - /url: "#scans"
+      - link "诊断" [ref=e31] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "操作" [ref=e35] [cursor=pointer]:
+        - /url: "#operations"
+      - link "规格" [ref=e41] [cursor=pointer]:
+        - /url: "#presets"
+      - link "设置" [ref=e45] [cursor=pointer]:
+        - /url: "#settings"
+    - button "退出" [ref=e49] [cursor=pointer]
+  - main [ref=e50]:
+    - generic [ref=e51]:
+      - generic [ref=e52]:
+        - paragraph [ref=e53]: 服务器测试图库 · 专用测试样本
+        - heading "受控操作" [level=1] [ref=e366]
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - text: 项目
+          - combobox "项目" [ref=e57]:
+            - option "服务器测试图库" [selected]
+        - generic [ref=e58]:
+          - text: Scope
+          - combobox "Scope" [ref=e59]:
+            - option "未选择"
+            - option "专用测试样本" [selected]
+        - generic [ref=e60]: swc-integration-ui-2776d1a3/gallery/
+    - generic [ref=e367]:
+      - generic [ref=e368]:
+        - button "分片上传" [ref=e369] [cursor=pointer]
+        - button "复制/移动" [ref=e370] [cursor=pointer]
+        - button "版本/标签/保留" [active] [ref=e371] [cursor=pointer]
+        - button "桶配置" [ref=e372] [cursor=pointer]
+        - button "引用 Manifest" [ref=e373] [cursor=pointer]
+        - button "审计/缓存/容量" [ref=e374] [cursor=pointer]
+      - generic [ref=e433]:
+        - generic [ref=e434]:
+          - heading "对象版本、标签、保留策略" [level=2] [ref=e435]
+          - generic [ref=e436]:
+            - text: 对象 ID
+            - textbox "对象 ID" [ref=e437]
+          - generic [ref=e438]:
+            - text: Version ID
+            - textbox "Version ID" [ref=e439]:
+              - /placeholder: 可留空读取当前版本
+          - generic [ref=e440]:
+            - text: 恢复目标 Key
+            - textbox "恢复目标 Key" [ref=e441]
+          - generic [ref=e442]:
+            - button "读取版本" [disabled] [ref=e443]
+            - button "恢复到新 Key" [disabled] [ref=e444]
+            - button "读取标签" [disabled] [ref=e445]
+          - generic [ref=e446]:
+            - text: 标签 JSON
+            - textbox "标签 JSON" [ref=e447]: "{}"
+          - button "写入标签" [disabled] [ref=e448]
+          - heading "Metadata copy" [level=2] [ref=e449]
+          - paragraph [ref=e450]: S3 metadata 修改通过复制到新 key 实现，源对象会先做 revision/ETag/size/checksum 防护校验。
+          - generic [ref=e451]:
+            - text: Metadata JSON
+            - textbox "Metadata JSON" [ref=e452]: "{}"
+          - generic [ref=e453]:
+            - text: Content-Type
+            - textbox "Content-Type" [ref=e454]:
+              - /placeholder: 留空保持后端默认
+          - generic [ref=e455]:
+            - button "读取 Metadata" [disabled] [ref=e456]
+            - button "复制写入 Metadata" [disabled] [ref=e457]
+          - button "读取保留/Legal Hold" [disabled] [ref=e459]
+          - generic [ref=e460]:
+            - text: Retention JSON
+            - textbox "Retention JSON" [ref=e461]: "{\"Mode\":\"GOVERNANCE\",\"RetainUntilDate\":\"2027-01-01T00:00:00Z\"}"
+          - generic [ref=e462]:
+            - text: Legal Hold JSON
+            - textbox "Legal Hold JSON" [ref=e463]: "{\"Status\":\"ON\"}"
+          - generic [ref=e464]:
+            - button "写 Retention" [disabled] [ref=e465]
+            - button "写 Legal Hold" [disabled] [ref=e466]
+        - generic [ref=e467]: 执行结果会显示在这里；不支持或权限不足时保留后端错误码。
