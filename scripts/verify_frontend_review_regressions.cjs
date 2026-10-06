@@ -8,14 +8,21 @@ const { spawn } = require("node:child_process");
 const { URL } = require("node:url");
 
 const root = path.resolve(__dirname, "..");
-const dist = path.join(root, "frontend", "dist");
+const dist = path.resolve(process.env.SWC_REGRESSION_DIST || path.join(root, "frontend", "dist"));
 const requests = [];
 let authMode = "auth";
+let projectScopesMode = "normal";
+let projectScopesReadCount = 0;
+let presetProjectMode = "normal";
 
 const project = { id: "project-1", project_key: "project-1", display_name: "Mock Project" };
+const projectTwo = { id: "project-2", project_key: "project-2", display_name: "Second Project" };
 const scopes = [
   { id: "scope-a", project_id: "project-1", connection_id: "s3-1", display_name: "Scope A", bucket: "bucket-a", prefix: "a/", allow_preview: true, allow_original_download: true, writable: true, manage_bucket: true },
   { id: "scope-b", project_id: "project-1", connection_id: "s3-1", display_name: "Scope B", bucket: "bucket-b", prefix: "b/", allow_preview: true, allow_original_download: true, writable: true, manage_bucket: true },
+];
+const projectTwoScopes = [
+  { id: "scope-c", project_id: "project-2", connection_id: "s3-1", display_name: "Scope C", bucket: "bucket-c", prefix: "c/", allow_preview: true, allow_original_download: true, writable: true, manage_bucket: true },
 ];
 const assetA = { id: "obj-a-1", asset_id: "asset-a-1", scope_id: "scope-a", bucket: "bucket-a", key: "a/scope-a-photo.jpg", key_display: "scope-a-photo.jpg", revision: "rev-a", version_id: "v-a-1", size_bytes: 12345, content_type: "image/jpeg", properties: { format: "jpeg", width: 640, height: 480, decode_status: "valid" }, preview_state: "ready", reference_status: "unknown" };
 
@@ -58,11 +65,28 @@ async function routeApi(req, res, url) {
   requests.push({ method, pathname, search: url.search, body, idempotencyKey: req.headers["idempotency-key"] || "", xIdempotencyKey: req.headers["x-idempotency-key"] || "" });
 
   if (pathname === "/api/v1/auth/me" && authMode !== "auth") return json(res, { error: { code: "UNAUTHENTICATED", message: "Invalid username or password." } }, 401);
-  if (pathname === "/api/v1/auth/me") return json(res, { user: { username: "reviewer" }, csrf_token: "csrf", projects: [project] });
+  if (pathname === "/api/v1/auth/me") return json(res, { user: { username: "reviewer" }, csrf_token: "csrf", projects: [project, projectTwo] });
   if (pathname === "/api/v1/auth/login" && authMode !== "auth") return json(res, { error: { code: "UNAUTHENTICATED", message: "Invalid username or password." } }, 401);
   if (pathname === "/api/v1/auth/login") return json(res, { user: { username: "reviewer" }, csrf_token: "csrf" });
   if (pathname === "/api/v1/connections") return json(res, { items: [{ id: "s3-1", display_name: "Mock S3", endpoint_url: "http://mock-s3.invalid", secret_ref: "mock-secret" }] });
-  if (pathname === "/api/v1/projects/project-1/scopes") return json(res, { items: scopes });
+  if (pathname === "/api/v1/projects/project-1/scopes") {
+    projectScopesReadCount += 1;
+    if (projectScopesMode === "delayed-second-scope-read" && projectScopesReadCount === 2) await wait(350);
+    return json(res, { items: scopes });
+  }
+  if (pathname === "/api/v1/projects/project-2/scopes") return json(res, { items: projectTwoScopes });
+  if (pathname === "/api/v1/projects/project-1/presets") {
+    if (presetProjectMode === "delayed-project-one-presets") await wait(350);
+    return json(res, { items: [{ id: "preset-old-project", name: "old-project-preset", version: 1, params: { mode: "fit", width: 320, height: 320, format: "webp" } }] });
+  }
+  if (pathname === "/api/v1/projects/project-2/presets") return json(res, { items: [{ id: "preset-new-project", name: "new-project-preset", version: 2, params: { mode: "fit", width: 640, height: 640, format: "webp" } }] });
+  if (pathname === "/api/v1/projects/project-1/groups") return json(res, { items: [{ id: "group-old-project", name: "old-project-group" }] });
+  if (pathname === "/api/v1/projects/project-2/groups") return json(res, { items: [{ id: "group-new-project", name: "new-project-group" }] });
+  if (pathname === "/api/v1/projects/project-1/groups/group-old-project/members") {
+    await wait(350);
+    return json(res, { items: [{ object_id: "stale-group-member", source: "manual" }] });
+  }
+  if (pathname === "/api/v1/projects/project-2/groups/group-new-project/members") return json(res, { items: [{ object_id: "fresh-group-member", source: "manual" }] });
   if (pathname === "/api/v1/management/connections") return json(res, { items: [{ id: "mgmt-1", name: "Mock Admin", admin_url: "http://mock-admin.invalid", s3_connection_id: "s3-1", protocol_baseline: "4.48", management_write_enabled: true, permissions: { "bucket.manage": true, "volume.manage": true, "file.manage": true, "object.manage": true, "table.manage": true, "mq.manage": true } }] });
   if (pathname === "/api/v1/management/connections/mgmt-1/access-policy" && method === "PUT") {
     const payload = body ? JSON.parse(body) : {};
@@ -85,10 +109,25 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/v1/scopes/scope-b/assets") return json(res, { items: [], next_cursor: null });
   if (pathname.includes("/objects/obj-a-1/preview")) return text(res, "mock-image", 200, "image/jpeg");
   if (pathname.includes("/objects/obj-a-1/versions")) return json(res, { items: [{ version_id: "v-a-1", is_latest: true, size: 12345, last_modified: "2026-10-05T00:00:00Z" }] });
+  if (pathname === "/api/v1/scopes/scope-a/bucket/cors") {
+    await wait(350);
+    return json(res, { current_hash: "old-scope-a-hash", config: { marker: "stale-bucket-config-scope-a" } });
+  }
+  if (pathname === "/api/v1/scopes/scope-b/bucket/cors") return json(res, { current_hash: "fresh-scope-b-hash", config: { marker: "fresh-bucket-config-scope-b" } });
+  if (pathname === "/api/v1/scopes/scope-a/derived-variants") return json(res, { items: [{ id: "variant-a", marker: "variant-scope-a" }] });
+  if (pathname === "/api/v1/scopes/scope-b/derived-variants") return json(res, { items: [] });
+  if (pathname === "/api/v1/scopes/scope-c/derived-variants") return json(res, { items: [{ id: "variant-c", marker: "variant-scope-c" }] });
+  if (pathname.endsWith("/derived-variants/health")) return json(res, { healthy: 0, missing: 0, corrupt: 0, outdated: 0, unknown: 1 });
   if (pathname === "/api/v1/jobs") {
     if (url.searchParams.get("scope_id") === "scope-a") await wait(300);
     return json(res, { items: url.searchParams.get("scope_id") === "scope-a" ? [{ id: "old-job-a", scope_id: "scope-a", kind: "scan", state: "running", processed: 0, errors: 0, total: null, control_request: "", updated_at: "2026-10-05T00:00:00Z" }] : [] });
   }
+  if (pathname === "/api/v1/scopes/scope-a/diagnostics/access" && method === "POST") {
+    await wait(350);
+    return json(res, { scope_id: "scope-a", object_id: "diag-old-object", marker: "stale-diagnostic-scope-a", preview: { status: "ok" } });
+  }
+  if (pathname === "/api/v1/scopes/scope-b/diagnostics/access" && method === "POST") return json(res, { scope_id: "scope-b", object_id: "diag-new-object", marker: "fresh-diagnostic-scope-b", preview: { status: "ok" } });
+  if (pathname.endsWith("/diagnostics/cors-read") && method === "POST") return json(res, { scope_id: pathname.includes("scope-a") ? "scope-a" : "scope-b", marker: "cors-diagnostic", cors: { status: "unknown" } });
 
   if (pathname.startsWith("/api/v1/management/mgmt-1/services/health")) return json(res, { services: { s3: { status: "healthy", endpoint: "mock", version: "4.48", source: "mock" }, master: { status: "unknown", endpoint: "master:9333", source: "mock" } } });
   if (pathname.startsWith("/api/v1/management/mgmt-1/services")) return json(res, { source: "mock-review", master_nodes: [{ address: "master:9333", is_leader: false }], filer_nodes: [{ address: "filer:8888" }], s3_nodes: [{ address: "s3:8333" }], volume_servers: [{ address: "volume:8080", datacenter: "dc1", rack: "rack1" }], services: {} });
@@ -273,9 +312,18 @@ const helpers = `
       if (!match) throw new Error("click target not found: " + text);
       match.click();
     },
+    openDetails(text) {
+      const details = [...document.querySelectorAll("details")].find((node) => (node.querySelector("summary")?.textContent || "").includes(text));
+      if (!details) throw new Error("details not found: " + text);
+      details.open = true;
+    },
     setContextScope(value) {
       const controls = [...document.querySelectorAll(".contextBar select")];
       setControl(controls[controls.length - 1], value);
+    },
+    setContextProject(value) {
+      const controls = [...document.querySelectorAll(".contextBar select")];
+      setControl(controls[0], value);
     },
     setInput(selector, value) {
       const control = document.querySelector(selector);
@@ -283,8 +331,11 @@ const helpers = `
       setControl(control, value);
     },
     setLabeled(panelText, labelText, value) {
-      const panel = [...document.querySelectorAll(".panel.inlinePanel")].find((node) => (node.textContent || "").includes(panelText)) ||
-        [...document.querySelectorAll(".managementPage")].find((node) => (node.textContent || "").includes(panelText));
+      const panels = [...document.querySelectorAll(".panel.inlinePanel,.managementPage,.workbenchCard,.imageWorkbench,.panel,section,div")]
+        .filter((node) => (node.textContent || "").includes(panelText))
+        .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length);
+      const panel = panels.find((node) => [...node.querySelectorAll("label")].some((label) => (label.textContent || "").includes(labelText))) ||
+        ((document.body.textContent || "").includes(panelText) ? document.body : null);
       if (!panel) throw new Error("panel not found: " + panelText);
       const label = [...panel.querySelectorAll("label")].find((node) => (node.textContent || "").includes(labelText));
       if (!label) throw new Error("label not found: " + labelText + " in " + [...panel.querySelectorAll("label")].map((node) => (node.textContent || "").trim()).join(" | "));
@@ -293,7 +344,10 @@ const helpers = `
       setControl(control, value);
     },
     hasLabeled(panelText, labelText) {
-      const panel = [...document.querySelectorAll(".panel.inlinePanel")].find((node) => (node.textContent || "").includes(panelText));
+      const panel = [...document.querySelectorAll(".panel.inlinePanel,.managementPage,.workbenchCard,.imageWorkbench,.panel,section,div")]
+        .filter((node) => (node.textContent || "").includes(panelText))
+        .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length)
+        .find((node) => [...node.querySelectorAll("label")].some((label) => (label.textContent || "").includes(labelText)));
       return !!panel && [...panel.querySelectorAll("label")].some((node) => (node.textContent || "").includes(labelText));
     },
     setFileInput(name, content) {
@@ -344,6 +398,31 @@ async function waitUntil(predicate, description, timeout = 10000) {
   throw new Error(`Timed out waiting for ${description}`);
 }
 
+async function tableDetailsDiagnostics(page) {
+  return {
+    fields: await page.eval(`(() => {
+      const panel = [...document.querySelectorAll(".panel.inlinePanel,.managementPage,.panel,section,div")]
+        .filter((node) => (node.textContent || "").includes("S3 Tables table details / data preview") || (node.textContent || "").includes("S3 Tables namespaces") || (node.textContent || "").includes("S3 Tables tables"))
+        .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length)
+        .at(-1) || document.body;
+      const valueFor = (text) => [...panel.querySelectorAll("label")]
+        .find((node) => (node.textContent || "").includes(text))
+        ?.querySelector("input,select,textarea")?.value || "";
+      return {
+        bucketArn: valueFor("Bucket ARN"),
+        namespace: valueFor("Namespace"),
+        tableName: valueFor("Table name"),
+        previewScope: valueFor("Preview scope"),
+        body: document.body.innerText,
+        buttons: [...document.querySelectorAll("button")]
+          .filter((el) => (el.textContent || "").includes("table details") || (el.textContent || "").includes("data sample"))
+          .map((el) => ({ text: el.textContent || "", disabled: el.disabled, title: el.getAttribute("title") || "" })),
+      };
+    })()`),
+    recentRequests: requests.slice(-16).map((item) => ({ method: item.method, pathname: item.pathname, search: item.search, body: item.body })),
+  };
+}
+
 async function main() {
   assert.ok(fs.existsSync(path.join(dist, "index.html")), "Run npm run build --prefix frontend before this regression check.");
   const server = await startServer();
@@ -361,8 +440,19 @@ async function main() {
     page.close();
     page = null;
     authMode = "auth";
+    projectScopesMode = "delayed-second-scope-read";
+    projectScopesReadCount = 0;
     page = await createPage(browser, `${base}/#assets`);
     await page.eval(helpers);
+    await waitFor(page, `document.querySelectorAll("article.asset").length > 0`);
+    await page.eval(`window.__test.setContextScope("scope-b")`);
+    await wait(500);
+    const selectionAfterDuplicateScopeRead = await page.eval(`({ scope: [...document.querySelectorAll(".contextBar select")].at(-1)?.value || "", body: document.body.innerText, assetCards: [...document.querySelectorAll("article.asset strong")].map((el) => el.textContent || "") })`);
+    assert.equal(selectionAfterDuplicateScopeRead.scope, "scope-b", "late duplicate scope list response must not reset an explicit scope selection");
+    assert.deepEqual(selectionAfterDuplicateScopeRead.assetCards, [], "late duplicate scope list response must not reload the previous scope assets");
+    assert.ok(!selectionAfterDuplicateScopeRead.body.includes("scope-a-photo.jpg"), "late duplicate scope list response must not restore old scope-a rows");
+    projectScopesMode = "normal";
+    await page.eval(`window.__test.setContextScope("scope-a")`);
     await waitFor(page, `document.querySelectorAll("article.asset").length > 0`);
     await page.eval(`window.__test.clickText("scope-a-photo.jpg")`);
     await waitFor(page, `!!document.querySelector(".drawer")`);
@@ -392,6 +482,93 @@ async function main() {
     assert.deepEqual(afterRace.assetCards, []);
     assert.ok(!afterRace.body.includes("slow-stale-photo.jpg"), "slow stale assets response must not overwrite newer scope");
 
+    await page.send("Page.navigate", { url: `${base}/#scans` });
+    await waitFor(page, `document.body.innerText.includes("Submit scan")`);
+    await page.eval(helpers);
+    await page.eval(`window.__test.setContextScope("scope-a")`);
+    await wait(50);
+    await page.eval(`window.__test.setContextScope("scope-b")`);
+    await wait(500);
+    const scansScopeB = await page.eval(`document.body.innerText`);
+    assert.ok(!scansScopeB.includes("old-job-a"), "slow scope-a scans refresh must not revive old jobs after switching to scope-b");
+    await page.eval(`window.__test.setContextScope("scope-a")`);
+    await wait(50);
+    await page.eval(`window.__test.setContextScope("scope-b")`);
+    await wait(500);
+    const scansAfterReverse = await page.eval(`document.body.innerText`);
+    assert.ok(!scansAfterReverse.includes("old-job-a"), "reversed scans responses must stay bound to the current scope");
+
+    await page.send("Page.navigate", { url: `${base}/#diagnostics` });
+    await waitFor(page, `document.body.innerText.includes("Object access diagnostics")`);
+    await page.eval(helpers);
+    await waitFor(page, `[...document.querySelectorAll(".contextBar select")].at(-1)?.value === "scope-b"`);
+    await page.eval(`window.__test.setContextScope("scope-a")`);
+    await page.eval(`window.__test.setLabeled("Object access diagnostics", "Object ID", "diag-old-object")`);
+    await page.eval(`window.__test.clickButton("Run HEAD/GET/preview diagnostics")`);
+    await wait(50);
+    await page.eval(`window.__test.setContextScope("scope-b")`);
+    await wait(500);
+    const diagnosticsAfterSwitch = await page.eval(`({ body: document.body.innerText, objectId: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("Object ID"))?.querySelector("input")?.value || "" })`);
+    assert.equal(diagnosticsAfterSwitch.objectId, "", "scope change must clear the diagnostics object id field");
+    assert.ok(!diagnosticsAfterSwitch.body.includes("stale-diagnostic-scope-a"), "slow scope-a diagnostic response must not render after switching scopes");
+    assert.ok(!diagnosticsAfterSwitch.body.includes("diag-old-object"), "old diagnostics object id must not survive scope change");
+    await page.eval(`window.__test.setLabeled("Object access diagnostics", "Object ID", "diag-new-object")`);
+    await page.eval(`window.__test.clickButton("Run HEAD/GET/preview diagnostics")`);
+    await waitFor(page, `document.body.innerText.includes("fresh-diagnostic-scope-b")`);
+    const diagnosticsScopeB = await page.eval(`document.body.innerText`);
+    assert.ok(!diagnosticsScopeB.includes("stale-diagnostic-scope-a"), "fresh diagnostics result must not be replaced by a completed stale response");
+
+    await page.send("Page.navigate", { url: `${base}/#operations` });
+    await waitFor(page, `document.body.innerText.includes("Controlled Operations")`);
+    await page.eval(helpers);
+    await page.eval(`window.__test.setContextScope("scope-a")`);
+    await wait(100);
+    await page.eval(`window.__test.clickButton("Bucket config")`);
+    await waitFor(page, `document.body.innerText.includes("Bucket config JSON editor")`);
+    await page.eval(`window.__test.clickButton("Read current config")`);
+    await wait(50);
+    await page.eval(`window.__test.setContextScope("scope-b")`);
+    await wait(500);
+    const bucketAfterSwitch = await page.eval(`({ body: document.body.innerText, hash: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("expected_current_hash"))?.querySelector("input")?.value || "", config: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("Config JSON"))?.querySelector("textarea")?.value || "" })`);
+    assert.equal(bucketAfterSwitch.hash, "", "scope change must clear stale bucket expected_current_hash");
+    assert.ok(!bucketAfterSwitch.config.includes("stale-bucket-config-scope-a"), "delayed bucket config read must not set config after switching scope");
+    assert.ok(!bucketAfterSwitch.body.includes("old-scope-a-hash"), "delayed bucket config read must not render old scope hash");
+    await page.eval(`window.__test.clickButton("Read current config")`);
+    await waitFor(page, `document.body.innerText.includes("fresh-scope-b-hash") || [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("expected_current_hash"))?.querySelector("input")?.value === "fresh-scope-b-hash"`);
+    const bucketScopeB = await page.eval(`({ body: document.body.innerText, hash: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("expected_current_hash"))?.querySelector("input")?.value || "", config: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("Config JSON"))?.querySelector("textarea")?.value || "" })`);
+    assert.equal(bucketScopeB.hash, "fresh-scope-b-hash", "new scope bucket config should render after an explicit read");
+    assert.ok(bucketScopeB.config.includes("fresh-bucket-config-scope-b"));
+    assert.ok(!bucketScopeB.config.includes("stale-bucket-config-scope-a"));
+
+    presetProjectMode = "delayed-project-one-presets";
+    await page.send("Page.navigate", { url: `${base}/#presets` });
+    await waitFor(page, `document.body.innerText.includes("Preset library")`);
+    await page.eval(helpers);
+    await page.eval(`window.__test.openDetails("Groups")`);
+    await wait(50);
+    await page.eval(`window.__test.setContextProject("project-2")`);
+    await wait(650);
+    await page.eval(`window.__test.openDetails("Groups")`);
+    const presetsAfterProjectSwitch = await page.eval(`({ body: document.body.innerText, project: [...document.querySelectorAll(".contextBar select")][0]?.value || "", scope: [...document.querySelectorAll(".contextBar select")].at(-1)?.value || "", preset: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("Preset"))?.querySelector("select")?.value || "", group: [...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("Group") && node.querySelector("select"))?.querySelector("select")?.value || "" })`);
+    assert.equal(presetsAfterProjectSwitch.project, "project-2", "project switch must stay on the explicitly selected project");
+    assert.equal(presetsAfterProjectSwitch.scope, "scope-c", "project switch should use the new project's scope");
+    assert.equal(presetsAfterProjectSwitch.preset, "preset-new-project", "late old project preset refresh must not retain an invalid preset id");
+    assert.equal(presetsAfterProjectSwitch.group, "group-new-project", "late old project group refresh must not retain an invalid group id");
+    assert.ok(presetsAfterProjectSwitch.body.includes("new-project-preset"));
+    assert.ok(!presetsAfterProjectSwitch.body.includes("old-project-preset"), "late old project preset refresh must not replace new project presets");
+    presetProjectMode = "normal";
+
+    await page.eval(`window.__test.setContextProject("project-1")`);
+    await waitFor(page, `[...document.querySelectorAll(".contextBar select")].at(-1)?.value === "scope-a"`);
+    await waitFor(page, `document.body.innerText.includes("old-project-group")`);
+    await page.eval(`window.__test.openDetails("Groups")`);
+    await page.eval(`window.__test.clickButton("Read members")`);
+    await wait(50);
+    await page.eval(`window.__test.setContextScope("scope-b")`);
+    await wait(500);
+    const groupMembersAfterSwitch = await page.eval(`document.body.innerText`);
+    assert.ok(!groupMembersAfterSwitch.includes("stale-group-member"), "delayed group members response must not render after switching scope");
+
     await page.send("Page.navigate", { url: `${base}/#settings` });
     await waitFor(page, `document.body.innerText.includes("Access policy")`);
     await page.eval(helpers);
@@ -415,14 +592,25 @@ async function main() {
     await waitFor(page, `window.__test.hasLabeled("S3 Tables tables", "Table name")`);
     await page.eval(`window.__test.setLabeled("S3 Tables tables", "Table name", "table_a")`);
     await page.eval(`window.__test.setLabeled("S3 Tables table details / data preview", "Preview scope", "scope-a")`);
+    await waitFor(page, `![...document.querySelectorAll("button")].find((el) => (el.textContent || "").includes("Read table details"))?.disabled`);
     await page.eval(`window.__test.clickButton("Read table details")`);
     await page.eval(`window.__test.setLabeled("S3 Tables tables", "Table name", "table_b")`);
-    await wait(1300);
+    await wait(1600);
     let detailText = await page.eval(`document.body.innerText`);
     assert.ok(!detailText.includes("details-table_a-ns_a"), "stale table_a details must stay hidden after inputs change while request is in flight");
     assert.ok(!detailText.includes("details-table_b-ns_a"), "table_b details should not be fabricated before an explicit new details request");
+    await waitFor(page, `[...document.querySelectorAll("label")].find((node) => (node.textContent || "").includes("Table name"))?.querySelector("input")?.value === "table_b"`);
+    try {
+      await waitFor(page, `![...document.querySelectorAll("button")].find((el) => (el.textContent || "").includes("Read table details"))?.disabled`);
+    } catch (error) {
+      throw new Error(`${String((error && error.message) || error)}\n${JSON.stringify(await tableDetailsDiagnostics(page), null, 2)}`);
+    }
     await page.eval(`window.__test.clickButton("Read table details")`);
-    await wait(200);
+    try {
+      await waitFor(page, `document.body.innerText.includes("details-table_b-ns_a")`);
+    } catch (error) {
+      throw new Error(`${String((error && error.message) || error)}\n${JSON.stringify(await tableDetailsDiagnostics(page), null, 2)}`);
+    }
     detailText = await page.eval(`document.body.innerText`);
     assert.ok(detailText.includes("details-table_b-ns_a"), "newer table_b details should render after explicit request");
     assert.ok(!detailText.includes("details-table_a-ns_a"), "stale table_a details must stay hidden after completion");

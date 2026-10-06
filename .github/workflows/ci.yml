@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    env:
+      PYTHONPATH: backend
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements-lock.txt
+            backend/requirements-dev.txt
+      - name: Install locked test dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+      - name: Check dependency compatibility
+        run: python -m pip check
+      - name: Test backend
+        run: python -m pytest backend/tests -q -p no:cacheprovider -o addopts= --junitxml=test-results/backend.xml
+      - name: Test Windows startup and packaging
+        if: runner.os == 'Windows'
+        run: python -m pytest tests/scripts -q -p no:cacheprovider -o addopts= --junitxml=test-results/scripts.xml
+      - name: Test packaging
+        if: runner.os == 'Linux'
+        run: python -m pytest tests/scripts/test_package_scripts.py -q -p no:cacheprovider -o addopts= --junitxml=test-results/scripts.xml
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-results-${{ matrix.os }}
+          path: test-results/*.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: Frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Build frontend
+        run: npm run build --prefix frontend
+      - name: Check bilingual UI and server rendering
+        run: npm run test:i18n --prefix frontend
+      - name: Check table preview rendering
+        run: node scripts/verify_table_preview_ui.cjs
+      - name: Locate Linux browser
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          task_chrome_path="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$task_chrome_path"
+          echo "CHROME_PATH=$task_chrome_path" >> "$GITHUB_ENV"
+      - name: Run mocked browser regressions
+        timeout-minutes: 5
+        run: node scripts/verify_frontend_review_regressions.cjs

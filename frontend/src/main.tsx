@@ -116,8 +116,21 @@ function App() {
   const authGeneration = useRef(0);
   const userRef = useRef("");
   const sessionInitializedRef = useRef(false);
+  const projectIdRef = useRef("");
+  const scopeIdRef = useRef("");
+  const scopesRequestRef = useRef(0);
   const unsafeIntentKeys = useRef(loadStoredIntentKeys());
   const pendingUnsafeRequests = useRef(new Set<string>());
+
+  function selectProject(nextProjectId: string) {
+    projectIdRef.current = nextProjectId;
+    setProjectId(nextProjectId);
+  }
+
+  function selectScope(nextScopeId: string) {
+    scopeIdRef.current = nextScopeId;
+    setScopeId(nextScopeId);
+  }
 
   function clearSessionState(message?: string, advanceGeneration = true) {
     if (advanceGeneration) authGeneration.current += 1;
@@ -130,8 +143,8 @@ function App() {
     setManagementLoading(false);
     setManagementId("");
     setScopes([]);
-    setProjectId("");
-    setScopeId("");
+    selectProject("");
+    selectScope("");
     setDeriveObjectIds([]);
     setSelectedObjectIds([]);
     setOperationTab("copy");
@@ -230,21 +243,34 @@ function App() {
     const normalized = normalizeProjects(me.projects || []);
     setAuthenticatedSession(me.user.username, me.csrf_token, Boolean(options.bootstrap && !sessionInitializedRef.current));
     setProjects(normalized);
-    const chosenProject = projectId || normalized[0]?.id || "";
-    if (!projectId && chosenProject) setProjectId(chosenProject);
+    const currentProjectId = projectIdRef.current;
+    const chosenProject = currentProjectId && normalized.some((item) => item.id === currentProjectId) ? currentProjectId : normalized[0]?.id || "";
+    if (chosenProject !== currentProjectId) selectProject(chosenProject);
     const list = await request<{ items: Connection[] }>("/connections");
     setConnections(list.items || []);
     await refreshManagementConnections();
     if (chosenProject) await refreshScopes(chosenProject);
   }
 
-  async function refreshScopes(nextProjectId = projectId) {
+  async function refreshScopes(nextProjectId = projectIdRef.current) {
     if (!nextProjectId) return;
-    const result = await request<{ items: Scope[] }>(`/projects/${nextProjectId}/scopes`);
-    setScopes(result.items || []);
-    if (!scopeId || !result.items.find((scope) => scope.id === scopeId)) {
-      setScopeId(result.items[0]?.id || "");
+    const requestId = ++scopesRequestRef.current;
+    const previousProjectId = projectIdRef.current;
+    if (previousProjectId !== nextProjectId) {
+      projectIdRef.current = nextProjectId;
+      selectScope("");
+      setScopes([]);
     }
+    const result = await request<{ items: Scope[] }>(`/projects/${nextProjectId}/scopes`);
+    if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
+    const items = result.items || [];
+    setScopes(items);
+    setScopeId((current) => {
+      const latest = scopeIdRef.current || current;
+      const next = latest && items.some((scope) => scope.id === latest) ? latest : items[0]?.id || "";
+      scopeIdRef.current = next;
+      return next;
+    });
   }
 
   async function refreshManagementConnections() {
@@ -362,13 +388,13 @@ function App() {
           {(imageRoute || route === "objects") && <div className="contextBar">
             <label className="field compact">
               {t("项目")}
-              <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+              <select value={projectId} onChange={(event) => selectProject(event.target.value)}>
                 {projects.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}
               </select>
             </label>
             <label className="field compact">
               {t("Scope")}
-              <select value={scopeId} onChange={(event) => setScopeId(event.target.value)}>
+              <select value={scopeId} onChange={(event) => selectScope(event.target.value)}>
                 <option value="">{t("未选择")}</option>
                 {scopes.map((item) => <option key={item.id} value={item.id}>{item.display_name || `${item.bucket}/${item.prefix || ""}`}</option>)}
               </select>
@@ -383,7 +409,7 @@ function App() {
         {route === "diagnostics" && <Diagnostics request={request} scopeId={scopeId} />}
         {route === "operations" && <Operations request={request} scopeId={scopeId} scope={scope} sourceObjectIds={selectedObjectIds} initialTab={operationTab} />}
         {route === "presets" && <Presets request={request} projectId={projectId} scopeId={scopeId} initialObjectIds={deriveObjectIds} />}
-        {route === "settings" && <Settings request={request} projects={projects} connections={connections} managementConnections={managementConnections} refresh={refresh} refreshManagementConnections={refreshManagementConnections} projectId={projectId} setProjectId={setProjectId} />}
+        {route === "settings" && <Settings request={request} projects={projects} connections={connections} managementConnections={managementConnections} refresh={refresh} refreshManagementConnections={refreshManagementConnections} projectId={projectId} setProjectId={selectProject} />}
       </main>
     </div>
   );
@@ -558,8 +584,20 @@ function Assets({ request, scopeId, projectId, onSelectionChange, sendToOperatio
   }, [contextKey]);
 
   return (
-    <section className="panel">
-      <div className="filters">
+    <section className="panel imageWorkbench assetsWorkbench">
+      <div className="workbenchHeader">
+        <div>
+          <p className="eyebrow">{t("Project Scope")}</p>
+          <h2>{t("图片库")}</h2>
+          <p className="hint">{t("浏览已索引对象，固定快照后再进入派生、复制和报告流程。")}</p>
+        </div>
+        <div className="summaryGrid compactMetrics">
+          <Metric label={t("对象数")} value={loading ? t("读取中") : items.length} />
+          <Metric label={t("已选择")} value={selected.size} />
+          <Metric label={t("下一页")} value={cursor ? t("有下一页") : t("无下一页或未知")} />
+        </div>
+      </div>
+      <div className="filters workbenchFilters">
         <input className="searchInput" placeholder={t("key 查询")} value={filters.query} onChange={(event) => setFilters({ ...filters, query: event.target.value })} />
         <input placeholder={t("prefix")} value={filters.prefix} onChange={(event) => setFilters({ ...filters, prefix: event.target.value })} />
         <select value={filters.format} onChange={(event) => setFilters({ ...filters, format: event.target.value })}>
@@ -589,7 +627,7 @@ function Assets({ request, scopeId, projectId, onSelectionChange, sendToOperatio
           </div>
         </details>
       </div>
-      <div className="toolbar">
+      <div className="toolbar workbenchActions">
         <button disabled={!scopeId || !items.length} onClick={submitPreviews}>{t("提交预览任务")}</button>
         <button disabled={!scopeId || !items.length} onClick={snapshot}>{t("固定选择/查询快照")}</button>
         <button disabled={!selected.size} onClick={() => sendToOperationsCopy([...selected])}>{t("批量复制")}</button>
@@ -604,43 +642,47 @@ function Assets({ request, scopeId, projectId, onSelectionChange, sendToOperatio
       {snapshotMessage && <div className="notice">{translateMessage(snapshotMessage)}<button onClick={() => setSnapshotMessage("")}>×</button></div>}
       {loading && <div className="notice">{t("加载中")}</div>}
       {!loading && items.length === 0 && <Empty text={t("当前 scope 没有对象。提交扫描任务后这里会显示真实索引结果。")} />}
-      <ComparePanel request={request} scopeId={scopeId} assets={items.filter((item) => selected.has(item.id)).slice(0, 2)} />
-      <div className={`assetGrid ${viewMode}`}>
-        {items.map((item) => {
-          const props = item.properties || {};
-          const ready = item.preview_state === "ready";
-          const open = () => setDetail(item);
-          return (
-            <article
-              className={selected.has(item.id) ? "asset selected" : "asset"}
-              key={item.id}
-              role="button"
-              tabIndex={0}
-              aria-label={t("打开对象详情 {name}", { name: item.key_display || item.key })}
-              onClick={open}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  open();
-                }
-              }}
-            >
-              <label onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><input type="checkbox" checked={selected.has(item.id)} onChange={(event) => setSelected(toggle(selected, item.id, event.target.checked))} /></label>
-              <div className="thumb">{ready ? <PreviewImage src={`${API}/scopes/${scopeId}/objects/${item.id}/preview`} alt={item.key} /> : <span>{String(props.decode_status || item.preview_state || "not_ready")}</span>}</div>
-              <div className="assetMeta">
-                <strong title={item.key}>{item.key_display || item.key}</strong>
-                <p>{String(props.format || "unknown")} · {String(props.width || "?")}×{String(props.height || "?")} · {formatBytes(item.size_bytes)}</p>
-                <small title={t("对象代际：{revision}", { revision: item.revision })}>{item.reference_status && item.reference_status !== "unknown" ? t("引用：{status}", { status: item.reference_status }) : t("引用状态未知")}</small>
-              </div>
-            </article>
-          );
-        })}
+      <div className="assetWorkspace">
+        <div className="assetContent">
+          <ComparePanel request={request} scopeId={scopeId} assets={items.filter((item) => selected.has(item.id)).slice(0, 2)} />
+          <div className={`assetGrid ${viewMode}`}>
+            {items.map((item) => {
+              const props = item.properties || {};
+              const ready = item.preview_state === "ready";
+              const open = () => setDetail(item);
+              return (
+                <article
+                  className={selected.has(item.id) ? "asset selected" : "asset"}
+                  key={item.id}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t("打开对象详情 {name}", { name: item.key_display || item.key })}
+                  onClick={open}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      open();
+                    }
+                  }}
+                >
+                  <label title={t("选择 {name}", { name: item.key_display || item.key })} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><input aria-label={t("选择 {name}", { name: item.key_display || item.key })} type="checkbox" checked={selected.has(item.id)} onChange={(event) => setSelected(toggle(selected, item.id, event.target.checked))} /></label>
+                  <div className="thumb">{ready ? <PreviewImage src={`${API}/scopes/${scopeId}/objects/${item.id}/preview`} alt={item.key} /> : <span>{String(props.decode_status || item.preview_state || "not_ready")}</span>}</div>
+                  <div className="assetMeta">
+                    <strong title={item.key}>{item.key_display || item.key}</strong>
+                    <p>{String(props.format || "unknown")} · {String(props.width || "?")}×{String(props.height || "?")} · {formatBytes(item.size_bytes)}</p>
+                    <small title={t("对象代际：{revision}", { revision: item.revision })}>{item.reference_status && item.reference_status !== "unknown" ? t("引用：{status}", { status: item.reference_status }) : t("引用状态未知")}</small>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+          {cursor && <button className="loadMore" onClick={() => load(true)}>{t("加载下一页")}</button>}
+        </div>
+        <aside className="assetAside">
+          <ReportBox title={t("任务")} data={jobs.slice(0, 6)} />
+          <ReportBox title={t("重复/容量")} data={{ duplicates, capacity }} />
+        </aside>
       </div>
-      {cursor && <button className="loadMore" onClick={() => load(true)}>{t("加载下一页")}</button>}
-      <section className="two" style={{ marginTop: 16 }}>
-        <ReportBox title={t("任务")} data={jobs.slice(0, 6)} />
-        <ReportBox title={t("重复/容量")} data={{ duplicates, capacity }} />
-      </section>
       {detail && detail.scope_id === scopeId && <Detail request={request} asset={detail} scopeId={scopeId} close={() => setDetail(null)} />}
     </section>
   );
@@ -742,42 +784,79 @@ function Scans({ request, scopeId, onChanged }: { request: Requester; scopeId: s
   const [jobs, setJobs] = useState<Job[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const token = useRef(0);
 
-  async function refresh() {
-    if (!scopeId) return;
-    const result = await request<{ items: Job[] }>(`/jobs?scope_id=${encodeURIComponent(scopeId)}`);
+  function clearState() {
+    token.current += 1;
+    setJobs([]);
+    setMessage("");
+    setError("");
+  }
+
+  async function refresh(requestScopeId = scopeId, current = token.current) {
+    if (!requestScopeId) {
+      clearState();
+      return;
+    }
+    const result = await request<{ items: Job[] }>(`/jobs?scope_id=${encodeURIComponent(requestScopeId)}`);
+    if (token.current !== current || requestScopeId !== scopeId) return;
     setJobs(result.items || []);
   }
 
   async function submit(kind: "scan" | "checksum") {
+    const requestScopeId = scopeId;
+    const current = token.current;
+    if (!requestScopeId) return;
     setError("");
     try {
-      const path = kind === "scan" ? `/scopes/${scopeId}/scans` : `/scopes/${scopeId}/checksum-scans`;
+      const path = kind === "scan" ? `/scopes/${requestScopeId}/scans` : `/scopes/${requestScopeId}/checksum-scans`;
       const result = await request<Job>(path, { method: "POST", body: JSON.stringify({}) });
+      if (token.current !== current || requestScopeId !== scopeId) return;
       setMessage(`${kind} 任务已提交：${result.id}`);
-      await refresh();
+      await refresh(requestScopeId, current);
       onChanged();
     } catch (err) {
-      setError(String((err as Error).message));
+      if (token.current === current && requestScopeId === scopeId) setError(String((err as Error).message));
     }
   }
 
   async function control(job: Job, action: string) {
+    const requestScopeId = scopeId;
+    const current = token.current;
+    if (!requestScopeId) return;
     await request(`/jobs/${job.id}/${action}`, { method: "POST", body: "{}" });
-    await refresh();
+    await refresh(requestScopeId, current);
   }
 
   useEffect(() => {
-    refresh().catch(() => undefined);
-    const id = setInterval(() => refresh().catch(() => undefined), 5000);
+    const requestScopeId = scopeId;
+    const current = ++token.current;
+    setJobs([]);
+    setMessage("");
+    setError("");
+    if (!requestScopeId) return;
+    refresh(requestScopeId, current).catch(() => undefined);
+    const id = setInterval(() => refresh(requestScopeId, current).catch(() => undefined), 5000);
     return () => clearInterval(id);
   }, [scopeId]);
 
   return (
-    <section className="panel two">
-      <div>
+    <section className="panel imageWorkbench">
+      <div className="workbenchHeader">
+        <div>
+          <p className="eyebrow">{t("Project Scope")}</p>
+          <h2>{t("任务与扫描")}</h2>
+          <p className="hint">{t("提交扫描、checksum 任务，并观察当前 Scope 的进度。")}</p>
+        </div>
+        <div className="summaryGrid compactMetrics">
+          <Metric label={t("任务")} value={jobs.length} />
+          <Metric label={t("运行中")} value={jobs.filter((job) => ["running", "queued"].includes(job.state)).length} />
+          <Metric label={t("错误")} value={jobs.reduce((count, job) => count + (Number(job.errors) || 0), 0)} />
+        </div>
+      </div>
+      <div className="workbenchSplit">
+      <div className="workbenchCard">
         <h2>{t("提交任务")}</h2>
-        <p className="hint">{t("扫描和 checksum 都由后端 worker 领取；这里仅提交任务并轮询状态。")}</p>
         <div className="toolbar">
           <button disabled={!scopeId} onClick={() => submit("scan")}>{t("提交扫描")}</button>
           <button disabled={!scopeId} onClick={() => submit("checksum")}>{t("提交 checksum")}</button>
@@ -785,6 +864,7 @@ function Scans({ request, scopeId, onChanged }: { request: Requester; scopeId: s
         {message && <div className="notice">{translateMessage(message)}</div>}
         {error && <div className="notice error">{translateMessage(error)}</div>}
       </div>
+      <div className="workbenchCard flush">
       <DataTable columns={[t("类型"), t("状态"), t("控制"), t("进度"), t("错误"), t("动作")]} rows={jobs.map((job) => [
         job.kind,
         <StatusPill text={job.state} />,
@@ -793,6 +873,8 @@ function Scans({ request, scopeId, onChanged }: { request: Requester; scopeId: s
         job.errors,
         <span className="actions"><button onClick={() => control(job, "pause")}>{t("暂停")}</button><button onClick={() => control(job, "cancel")}>{t("取消")}</button><button onClick={() => control(job, "retry")}>{t("重试")}</button></span>
       ])} />
+      </div>
+      </div>
     </section>
   );
 }
@@ -802,19 +884,43 @@ function Diagnostics({ request, scopeId }: { request: Requester; scopeId: string
   const [origin, setOrigin] = useState("http://localhost:5173");
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState("");
+  const token = useRef(0);
 
   async function run(path: string, body: Record<string, unknown>) {
+    const requestScopeId = scopeId;
+    const current = token.current;
+    if (!requestScopeId) return;
     setError("");
     try {
-      setResult(await request(path, { method: "POST", body: JSON.stringify(body) }));
+      const value = await request(path, { method: "POST", body: JSON.stringify(body) });
+      if (token.current === current && requestScopeId === scopeId) setResult(value);
     } catch (err) {
-      setError(String((err as Error).message));
+      if (token.current === current && requestScopeId === scopeId) setError(String((err as Error).message));
     }
   }
 
+  useEffect(() => {
+    token.current += 1;
+    setObjectId("");
+    setResult(null);
+    setError("");
+  }, [scopeId]);
+
   return (
-    <section className="panel two">
-      <div>
+    <section className="panel imageWorkbench">
+      <div className="workbenchHeader">
+        <div>
+          <p className="eyebrow">{t("Project Scope")}</p>
+          <h2>{t("诊断证据")}</h2>
+          <p className="hint">{t("验证对象访问、预览和 CORS；切换 Scope 后重新选择对象。")}</p>
+        </div>
+        <div className="summaryGrid compactMetrics">
+          <Metric label={t("结果")} value={result ? t("已读取") : t("未读取")} />
+          <Metric label={t("对象 ID")} value={objectId || t("未选择")} />
+        </div>
+      </div>
+      <div className="workbenchSplit">
+      <div className="workbenchCard">
         <h2>{t("对象访问诊断")}</h2>
         <label className="field">{t("对象 ID")}<input value={objectId} onChange={(event) => setObjectId(event.target.value)} /></label>
         <button disabled={!scopeId || !objectId} onClick={() => run(`/scopes/${scopeId}/diagnostics/access`, { object_id: objectId })}>{t("运行 HEAD/GET/预览诊断")}</button>
@@ -822,9 +928,10 @@ function Diagnostics({ request, scopeId }: { request: Requester; scopeId: string
         <label className="field">{t("业务 Origin")}<input value={origin} onChange={(event) => setOrigin(event.target.value)} /></label>
         <button disabled={!scopeId} onClick={() => run(`/scopes/${scopeId}/diagnostics/cors-read`, { origin })}>{t("读取 CORS 证据")}</button>
       </div>
-      <div>
+      <div className="workbenchCard">
         {error && <div className="notice error">{translateMessage(error)}</div>}
         {result ? <EvidenceDetails title={t("诊断原始证据")} data={result} open /> : <Empty text={t("诊断结果会保留执行位置、时间和证据等级。未验证浏览器 trace 时保持 unknown。")} />}
+      </div>
       </div>
     </section>
   );
@@ -845,21 +952,29 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
   const [manifest, setManifest] = useState({ manifest_id: "", entries: '[{"key":""}]', declared_hash: "", finalize: true });
   const [capacity, setCapacity] = useState({ thresholds: '{"source_bytes":10737418240}' });
   const [trash, setTrash] = useState({ variant_id: "", reason: "manual review" });
+  const token = useRef(0);
   const scopeWritable = Boolean(scope?.writable);
   const scopeCanManageBucket = Boolean(scope?.manage_bucket);
 
-  async function run(label: string, fn: () => Promise<unknown>) {
+  async function run(label: string, fn: () => Promise<unknown>, apply?: (value: any) => void) {
+    const requestScopeId = scopeId;
+    const current = token.current;
     setError("");
     try {
-      setResult({ label, value: await fn() });
+      const value = await fn();
+      if (token.current !== current || requestScopeId !== scopeId) return;
+      apply?.(value);
+      setResult({ label, value });
     } catch (err) {
-      setError(String((err as Error).message));
+      if (token.current === current && requestScopeId === scopeId) setError(String((err as Error).message));
     }
   }
 
   async function initUpload() {
-    const value = await request<any>(`/scopes/${scopeId}/uploads/multipart`, { method: "POST", body: JSON.stringify({ key: upload.key, metadata: parseJsonObject(upload.metadata, "metadata") }) });
-    if (value?.id) setUpload((old) => ({ ...old, uploadId: value.id }));
+    const requestScopeId = scopeId;
+    const current = token.current;
+    const value = await request<any>(`/scopes/${requestScopeId}/uploads/multipart`, { method: "POST", body: JSON.stringify({ key: upload.key, metadata: parseJsonObject(upload.metadata, "metadata") }) });
+    if (token.current === current && requestScopeId === scopeId && value?.id) setUpload((old) => ({ ...old, uploadId: value.id }));
     return value;
   }
 
@@ -898,13 +1013,42 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
   }
 
   async function loadObjectVersions() {
-    const value = await request(`/scopes/${scopeId}/objects/${encodeURIComponent(objectOps.object_id)}/versions`);
-    setObjectVersions(objectVersionRows(value));
+    const requestScopeId = scopeId;
+    const current = token.current;
+    const value = await request(`/scopes/${requestScopeId}/objects/${encodeURIComponent(objectOps.object_id)}/versions`);
+    if (token.current === current && requestScopeId === scopeId) setObjectVersions(objectVersionRows(value));
     return value;
   }
 
+  useEffect(() => {
+    token.current += 1;
+    setResult(null);
+    setError("");
+    setFile(null);
+    setObjectVersions([]);
+    setUpload((old) => ({ ...old, uploadId: "", parts: "[]" }));
+    setCopy((old) => ({ ...old, object_id: "", target_key: "" }));
+    setCopyBatch((old) => ({ ...old, object_ids: "", target_scope_id: scopeId, target_keys: "", batch_id: "", idempotency_key: "" }));
+    setObjectOps((old) => ({ ...old, object_id: "", version_id: "", target_key: "" }));
+    setBucket((old) => ({ ...old, expected_current_hash: "", snapshot_id: "", exclusive_writer_ack: false }));
+    setManifest((old) => ({ ...old, manifest_id: "" }));
+    setTrash((old) => ({ ...old, variant_id: "" }));
+  }, [scopeId]);
+
   return (
-    <section className="panel">
+    <section className="panel imageWorkbench">
+      <div className="workbenchHeader">
+        <div>
+          <p className="eyebrow">{t("Project Scope")}</p>
+          <h2>{t("受控操作")}</h2>
+          <p className="hint">{t("执行上传、复制、版本、桶配置和容量操作；禁用项会显示原因。")}</p>
+        </div>
+        <div className="summaryGrid compactMetrics">
+          <Metric label={t("writable")} value={scopeWritable ? t("yes") : t("no")} />
+          <Metric label={t("manage_bucket")} value={scopeCanManageBucket ? t("yes") : t("no")} />
+          <Metric label={t("结果")} value={result ? t("已读取") : t("未读取")} />
+        </div>
+      </div>
       <div className="tabs">
         {[
           ["upload", "分片上传"], ["copy", "复制/移动"], ["object", "版本/标签/保留"],
@@ -995,10 +1139,8 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
         <label className="field">{t("配置 JSON")}<textarea value={bucket.config} onChange={(event) => setBucket({ ...bucket, config: event.target.value })} /></label>
         <label className="ack"><input type="checkbox" checked={bucket.exclusive_writer_ack} onChange={(event) => setBucket({ ...bucket, exclusive_writer_ack: event.target.checked })} /> {t("我确认当前没有其他控制台或脚本同时修改该 bucket 配置")}</label>
         <div className="toolbar">
-          <button disabled={!scopeId} onClick={() => run("bucket.get", async () => {
-            const value = await request<any>(`/scopes/${scopeId}/bucket/${bucket.kind}`);
+          <button disabled={!scopeId} onClick={() => run("bucket.get", () => request<any>(`/scopes/${scopeId}/bucket/${bucket.kind}`), (value) => {
             setBucket((old) => ({ ...old, config: JSON.stringify(value.config ?? {}, null, 2), expected_current_hash: value.current_hash || "", exclusive_writer_ack: false }));
-            return value;
           })}>{t("读取当前配置")}</button>
           <button disabled={!scopeId || !scopeCanManageBucket || !bucket.expected_current_hash || !bucket.exclusive_writer_ack} title={scopeCanManageBucket ? "" : t("当前 Scope 未开启 manage_bucket")} onClick={() => run("bucket.put", () => request(`/scopes/${scopeId}/bucket/${bucket.kind}`, { method: "POST", body: JSON.stringify({ config: parseJsonObject(bucket.config, "config"), expected_current_hash: bucket.expected_current_hash, exclusive_writer_ack: bucket.exclusive_writer_ack }) }))}>{t("保存配置")}</button>
           <button disabled={!scopeId || !scopeCanManageBucket || !bucket.snapshot_id || !bucket.expected_current_hash || !bucket.exclusive_writer_ack} title={scopeCanManageBucket ? "" : t("当前 Scope 未开启 manage_bucket")} onClick={() => run("bucket.rollback", () => request(`/scopes/${scopeId}/bucket/${bucket.kind}/rollback`, { method: "POST", body: JSON.stringify({ snapshot_id: bucket.snapshot_id, expected_current_hash: bucket.expected_current_hash, exclusive_writer_ack: bucket.exclusive_writer_ack }) }))}>{t("回滚到快照")}</button>
@@ -1054,33 +1196,53 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
   const [groupMembers, setGroupMembers] = useState<unknown>(null);
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState("");
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const token = useRef(0);
+  const previousProject = useRef(projectId);
 
-  async function refresh() {
-    if (!projectId) return;
+  async function refresh(requestProjectId = projectId, requestScopeId = scopeId, current = token.current) {
+    if (!requestProjectId) return;
     const [presetResult, groupResult] = await Promise.all([
-      request<Preset[] | { items: Preset[] }>(`/projects/${projectId}/presets`),
-      request<{ items: any[] }>(`/projects/${projectId}/groups`).catch(() => ({ items: [] }))
+      request<Preset[] | { items: Preset[] }>(`/projects/${requestProjectId}/presets`),
+      request<{ items: any[] }>(`/projects/${requestProjectId}/groups`).catch(() => ({ items: [] }))
     ]);
+    if (token.current !== current || requestProjectId !== projectId || requestScopeId !== scopeId) return;
     const nextPresets = Array.isArray(presetResult) ? presetResult : presetResult.items || [];
+    const nextGroups = groupResult.items || [];
     setItems(nextPresets);
-    setGroups(groupResult.items || []);
-    if (!derive.preset_id && nextPresets[0]?.id) setDerive((old) => ({ ...old, preset_id: nextPresets[0].id }));
-    if (batchPresetIds.size === 0 && nextPresets[0]?.id) setBatchPresetIds(new Set([nextPresets[0].id]));
-    if (!group.group_id && groupResult.items?.[0]?.id) setGroup((old) => ({ ...old, group_id: groupResult.items[0].id }));
-    if (scopeId) {
-      setVariants((await request<{ items: any[] }>(`/scopes/${scopeId}/derived-variants`).catch(() => ({ items: [] }))).items || []);
-      setHealth(await request(`/scopes/${scopeId}/derived-variants/health`).catch((err) => ({ error: String((err as Error).message) })));
+    setGroups(nextGroups);
+    setDerive((old) => ({ ...old, preset_id: nextPresets.some((item) => item.id === old.preset_id) ? old.preset_id : nextPresets[0]?.id || "" }));
+    setBatchPresetIds((old) => {
+      const validIds = new Set(nextPresets.map((item) => item.id));
+      const next = new Set([...old].filter((id) => validIds.has(id)));
+      if (next.size === 0 && nextPresets[0]?.id) next.add(nextPresets[0].id);
+      return next;
+    });
+    setGroup((old) => ({ ...old, group_id: nextGroups.some((item) => item.id === old.group_id) ? old.group_id : nextGroups[0]?.id || "" }));
+    if (requestScopeId) {
+      const [variantResult, healthResult] = await Promise.all([
+        request<{ items: any[] }>(`/scopes/${requestScopeId}/derived-variants`).catch(() => ({ items: [] })),
+        request(`/scopes/${requestScopeId}/derived-variants/health`).catch((err) => ({ error: String((err as Error).message) }))
+      ]);
+      if (token.current !== current || requestProjectId !== projectId || requestScopeId !== scopeId) return;
+      setVariants(variantResult.items || []);
+      setHealth(healthResult);
     }
   }
 
-  async function run(label: string, fn: () => Promise<unknown>, after = true) {
+  async function run(label: string, fn: () => Promise<unknown>, after = true, apply?: (value: any) => void) {
+    const requestProjectId = projectId;
+    const requestScopeId = scopeId;
+    const current = token.current;
     setError("");
     try {
       const value = await fn();
+      if (token.current !== current || requestProjectId !== projectId || requestScopeId !== scopeId) return;
+      apply?.(value);
       setResult({ label, value });
-      if (after) await refresh();
+      if (after) await refresh(requestProjectId, requestScopeId, current);
     } catch (err) {
-      setError(String((err as Error).message));
+      if (token.current === current && requestProjectId === projectId && requestScopeId === scopeId) setError(String((err as Error).message));
     }
   }
 
@@ -1100,14 +1262,36 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
     return params;
   }
 
-  useEffect(() => { refresh().catch(() => undefined); }, [projectId, scopeId]);
+  useEffect(() => {
+    const current = ++token.current;
+    const projectChanged = previousProject.current !== projectId;
+    previousProject.current = projectId;
+    setVariants([]);
+    setHealth(null);
+    setGroupMembers(null);
+    setResult(null);
+    setError("");
+    setDerive((old) => ({ ...old, object_id: "", output_key: "", output_scope_id: "", object_ids: "", snapshot_id: "", batch_id: "", idempotency_key: "", preset_id: projectChanged ? "" : old.preset_id }));
+    setGroup((old) => ({ ...old, object_id: "", group_id: projectChanged ? "" : old.group_id }));
+    if (projectChanged) {
+      setItems([]);
+      setGroups([]);
+      setBatchPresetIds(new Set());
+    }
+    refresh(projectId, scopeId, current).catch(() => undefined);
+  }, [projectId, scopeId]);
 
   useEffect(() => {
-    if (initialObjectIds.length) setDerive((old) => ({ ...old, object_ids: initialObjectIds.join("\n"), snapshot_id: "" }));
+    if (initialObjectIds.length) {
+      setDerive((old) => ({ ...old, object_ids: initialObjectIds.join("\n"), snapshot_id: "" }));
+      setHandoffOpen(true);
+    }
   }, [initialObjectIds.join("|")]);
 
   const batchObjectIds = derive.object_ids.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
   const selectedPresetIds = [...batchPresetIds];
+  const derivePresetValid = Boolean(derive.preset_id && items.some((item) => item.id === derive.preset_id));
+  const groupIdValid = Boolean(group.group_id && groups.some((item) => item.id === group.group_id));
   const plannedBatchCount = (batchObjectIds.length || (derive.snapshot_id ? 1 : 0)) * selectedPresetIds.length;
 
   function submitBatch() {
@@ -1122,8 +1306,22 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
   }
 
   return (
-    <section className="panel two">
-      <div>
+    <section className="panel imageWorkbench">
+      <div className="workbenchHeader">
+        <div>
+          <p className="eyebrow">{t("Project Scope")}</p>
+          <h2>{t("图片规格")}</h2>
+          <p className="hint">{t("管理规格、派生批次、分组和健康证据。")}</p>
+        </div>
+        <div className="summaryGrid compactMetrics">
+          <Metric label={t("规格")} value={items.length} />
+          <Metric label={t("派生记录")} value={variants.length} />
+          <Metric label={t("分组")} value={groups.length} />
+          <Metric label={t("预计任务")} value={plannedBatchCount || t("unknown")} />
+        </div>
+      </div>
+      <div className="workbenchSplit">
+      <div className="workbenchCard">
         <h2>{t("规格库")}</h2>
         <label className="field">{t("名称")}<input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <div className="miniGrid">
@@ -1141,43 +1339,44 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
         <label className="field">{t("Preset")}<select value={derive.preset_id} onChange={(event) => setDerive({ ...derive, preset_id: event.target.value })}>{items.map((item) => <option key={item.id} value={item.id}>{item.name} v{item.version}</option>)}</select></label>
         <label className="field">{t("输出 Key")}<input value={derive.output_key} onChange={(event) => setDerive({ ...derive, output_key: event.target.value })} /></label>
         <label className="field">{t("输出 Scope ID")}<input value={derive.output_scope_id} onChange={(event) => setDerive({ ...derive, output_scope_id: event.target.value })} placeholder={t("留空使用当前 scope")} /></label>
-        <button disabled={!scopeId || !derive.object_id || !derive.preset_id} onClick={() => run("variant.submit", () => request(`/scopes/${scopeId}/derived-variants`, { method: "POST", body: JSON.stringify({ object_id: derive.object_id, preset_id: derive.preset_id, output_key: derive.output_key || undefined, output_scope_id: derive.output_scope_id || undefined }) }))}>{t("提交派生任务")}</button>
-        <h2>{t("批量派生")}</h2>
-        <p className="hint">{t("已知选中对象直接提交 object_ids；全查询范围必须先在资产页固定 snapshot，再填 snapshot_id。预计提交数只按已知对象数或 snapshot×preset 数计算。")}</p>
-        <label className="field">{t("对象 ID 列表")}<textarea value={derive.object_ids} onChange={(event) => setDerive({ ...derive, object_ids: event.target.value, snapshot_id: "" })} placeholder={t("每行一个 object_id，可由资产页“生成派生”带入")} /></label>
-        <label className="field">{t("Snapshot ID")}<input value={derive.snapshot_id} onChange={(event) => setDerive({ ...derive, snapshot_id: event.target.value, object_ids: "" })} placeholder={t("批量全查询时使用固定快照")} /></label>
-        <div className="presetChecks" aria-label={t("批量 preset")}>
-          {items.map((item) => <label key={item.id}><input type="checkbox" checked={batchPresetIds.has(item.id)} onChange={(event) => setBatchPresetIds(toggle(batchPresetIds, item.id, event.target.checked))} /> {item.name} v{item.version}</label>)}
-        </div>
-        <label className="field">{t("Idempotency Key")}<input value={derive.idempotency_key} onChange={(event) => setDerive({ ...derive, idempotency_key: event.target.value })} placeholder={t("可选，重试时复用")} /></label>
-        <div className="summaryGrid">
-          <Metric label={t("对象来源")} value={batchObjectIds.length ? `${batchObjectIds.length} selected` : derive.snapshot_id ? "snapshot" : "none"} />
-          <Metric label={t("Preset 数")} value={selectedPresetIds.length} />
-          <Metric label={t("预计任务")} value={plannedBatchCount || t("unknown")} />
-        </div>
-        <button disabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} onClick={() => run("variant.batch.submit", submitBatch)}>{t("提交批量派生")}</button>
-        <label className="field">{t("Batch ID")}<input value={derive.batch_id} onChange={(event) => setDerive({ ...derive, batch_id: event.target.value })} placeholder={t("批量提交返回的 id")} /></label>
-        <button disabled={!scopeId || !derive.batch_id} onClick={() => run("variant.batch.get", () => request(`/scopes/${scopeId}/derived-variant-batches/${encodeURIComponent(derive.batch_id)}`), false)}>{t("读取批次详情")}</button>
-        <h2>{t("分组")}</h2>
-        <label className="field">{t("组名")}<input value={group.name} onChange={(event) => setGroup({ ...group, name: event.target.value })} /></label>
-        <button disabled={!projectId || !group.name} onClick={() => run("group.create", () => request(`/projects/${projectId}/groups`, { method: "POST", body: JSON.stringify({ name: group.name, source: "manual" }) }))}>{t("创建组")}</button>
-        <label className="field">{t("Group")}<select value={group.group_id} onChange={(event) => setGroup({ ...group, group_id: event.target.value })}>{groups.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <label className="field">{t("对象 ID")}<input value={group.object_id} onChange={(event) => setGroup({ ...group, object_id: event.target.value })} /></label>
-        <button disabled={!projectId || !group.group_id || !group.object_id} onClick={() => run("group.member.add", () => request(`/projects/${projectId}/groups/${encodeURIComponent(group.group_id)}/members`, { method: "POST", body: JSON.stringify({ object_id: group.object_id, source: "manual" }) }))}>{t("加入组")}</button>
-        <button disabled={!projectId || !group.group_id} onClick={() => run("group.members", async () => {
-          const value = await request(`/projects/${projectId}/groups/${encodeURIComponent(group.group_id)}/members`);
-          setGroupMembers(value);
-          return value;
-        }, false)}>{t("读取成员")}</button>
+        <button disabled={!scopeId || !derive.object_id || !derivePresetValid} onClick={() => run("variant.submit", () => request(`/scopes/${scopeId}/derived-variants`, { method: "POST", body: JSON.stringify({ object_id: derive.object_id, preset_id: derive.preset_id, output_key: derive.output_key || undefined, output_scope_id: derive.output_scope_id || undefined }) }))}>{t("提交派生任务")}</button>
+        <details className="workbenchDetails" open={handoffOpen || Boolean(batchObjectIds.length || derive.snapshot_id)}>
+          <summary>{t("批量派生")}</summary>
+          <p className="hint">{t("已知选中对象直接提交 object_ids；全查询范围必须先在资产页固定 snapshot，再填 snapshot_id。预计提交数只按已知对象数或 snapshot×preset 数计算。")}</p>
+          <label className="field">{t("对象 ID 列表")}<textarea value={derive.object_ids} onChange={(event) => { setDerive({ ...derive, object_ids: event.target.value, snapshot_id: "" }); setHandoffOpen(true); }} placeholder={t("每行一个 object_id，可由资产页“生成派生”带入")} /></label>
+          <label className="field">{t("Snapshot ID")}<input value={derive.snapshot_id} onChange={(event) => { setDerive({ ...derive, snapshot_id: event.target.value, object_ids: "" }); setHandoffOpen(true); }} placeholder={t("批量全查询时使用固定快照")} /></label>
+          <div className="presetChecks" aria-label={t("批量 preset")}>
+            {items.map((item) => <label key={item.id}><input type="checkbox" checked={batchPresetIds.has(item.id)} onChange={(event) => setBatchPresetIds(toggle(batchPresetIds, item.id, event.target.checked))} /> {item.name} v{item.version}</label>)}
+          </div>
+          <label className="field">{t("Idempotency Key")}<input value={derive.idempotency_key} onChange={(event) => setDerive({ ...derive, idempotency_key: event.target.value })} placeholder={t("可选，重试时复用")} /></label>
+          <div className="summaryGrid">
+            <Metric label={t("对象来源")} value={batchObjectIds.length ? `${batchObjectIds.length} selected` : derive.snapshot_id ? "snapshot" : "none"} />
+            <Metric label={t("Preset 数")} value={selectedPresetIds.length} />
+            <Metric label={t("预计任务")} value={plannedBatchCount || t("unknown")} />
+          </div>
+          <button disabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} onClick={() => run("variant.batch.submit", submitBatch)}>{t("提交批量派生")}</button>
+          <label className="field">{t("Batch ID")}<input value={derive.batch_id} onChange={(event) => setDerive({ ...derive, batch_id: event.target.value })} placeholder={t("批量提交返回的 id")} /></label>
+          <button disabled={!scopeId || !derive.batch_id} onClick={() => run("variant.batch.get", () => request(`/scopes/${scopeId}/derived-variant-batches/${encodeURIComponent(derive.batch_id)}`), false)}>{t("读取批次详情")}</button>
+        </details>
+        <details className="workbenchDetails">
+          <summary>{t("分组")}</summary>
+          <label className="field">{t("组名")}<input value={group.name} onChange={(event) => setGroup({ ...group, name: event.target.value })} /></label>
+          <button disabled={!projectId || !group.name} onClick={() => run("group.create", () => request(`/projects/${projectId}/groups`, { method: "POST", body: JSON.stringify({ name: group.name, source: "manual" }) }))}>{t("创建组")}</button>
+          <label className="field">{t("Group")}<select value={group.group_id} onChange={(event) => setGroup({ ...group, group_id: event.target.value })}>{groups.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <label className="field">{t("对象 ID")}<input value={group.object_id} onChange={(event) => setGroup({ ...group, object_id: event.target.value })} /></label>
+          <button disabled={!projectId || !groupIdValid || !group.object_id} onClick={() => run("group.member.add", () => request(`/projects/${projectId}/groups/${encodeURIComponent(group.group_id)}/members`, { method: "POST", body: JSON.stringify({ object_id: group.object_id, source: "manual" }) }))}>{t("加入组")}</button>
+          <button disabled={!projectId || !groupIdValid} onClick={() => run("group.members", () => request(`/projects/${projectId}/groups/${encodeURIComponent(group.group_id)}/members`), false, setGroupMembers)}>{t("读取成员")}</button>
+        </details>
         {error && <div className="notice error">{translateMessage(error)}</div>}
       </div>
-      <div className="stack">
+      <div className="stack workbenchCard flush">
         <DataTable columns={[t("名称"), t("版本"), t("模式"), t("尺寸"), t("格式")]} rows={items.map((item) => [item.name, item.version, String(item.params?.mode || "fit"), `${String(item.params?.width || "?")}×${String(item.params?.height || "?")}`, String(item.params?.format || "webp")])} />
         <DerivedHealthPanel data={health} refresh={() => refresh().catch(() => undefined)} rebuildDisabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} rebuild={() => run("variant.health.rebuild", submitBatch)} />
         <ReportBox title={t("派生记录")} data={variants.slice(0, 12)} />
         <ReportBox title={t("分组")} data={groups.slice(0, 12)} />
         <ReportBox title={t("分组成员")} data={groupMembers} />
         <ResultPane error="" result={result} />
+      </div>
       </div>
     </section>
   );

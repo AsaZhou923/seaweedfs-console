@@ -863,8 +863,18 @@ def _run_app_flow(config: SmokeConfig, bucket: str, tmp_dir: Path) -> None:
     if trends["auto_samples"][0].get("object_count", 0) < len(RAW_KEYS) + 1 or trends["auto_samples"][0].get("version_bytes") is not None:
         raise AssertionError(f"capacity auto sample did not preserve scan metrics and unknown version bytes: {trends}")
     thresholds = _assert_ok(_post(client, f"/api/v1/scopes/{scope['id']}/capacity-thresholds", csrf, {"thresholds": {"unknown_bytes": 1}}), "capacity thresholds")
-    if thresholds.get("status") not in {"ok", "alerting"}:
-        raise AssertionError(f"capacity thresholds response invalid: {thresholds}")
+    if (thresholds.get("status") != "unknown" or thresholds.get("alerts") != []
+            or "unknown_bytes" not in thresholds.get("unknown_fields", [])):
+        raise AssertionError(f"unmeasured capacity must stay unknown without a false zero or alert: {thresholds}")
+    measured_thresholds = _assert_ok(
+        _post(client, f"/api/v1/scopes/{scope['id']}/capacity-thresholds", csrf,
+              {"thresholds": {"source_bytes": 1, "unknown_bytes": 1}}),
+        "measured capacity thresholds",
+    )
+    if (measured_thresholds.get("status") != "alerting"
+            or not any(alert.get("field") == "source_bytes" for alert in measured_thresholds.get("alerts", []))
+            or "unknown_bytes" not in measured_thresholds.get("unknown_fields", [])):
+        raise AssertionError(f"measured excess must alert while retaining unknown fields: {measured_thresholds}")
     print(f"CAPABILITY_LIMIT retention=UNSUPPORTED_CAPABILITY version_count={len(versions.get('versions', []))}")
     print(f"ENHANCED_PASS derived={variant['id']} multipart={upload['id']} snapshot={snapshot['id']}")
 

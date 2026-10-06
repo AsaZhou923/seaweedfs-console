@@ -1,5 +1,7 @@
 # SeaweedFS Console
 
+[![CI](https://github.com/AsaZhou923/seaweedfs-console/actions/workflows/ci.yml/badge.svg)](https://github.com/AsaZhou923/seaweedfs-console/actions/workflows/ci.yml)
+
 **A third-party web console for SeaweedFS cluster management and image asset workflows.**
 
 English | [简体中文](README.zh-CN.md)
@@ -66,6 +68,8 @@ The administrator password is stored as a hash on first startup. Changing the en
 
 Management writes are disabled by default. Enable only the actions and target ranges you need. Missing dependencies and unsupported capabilities are reported explicitly.
 
+The image workbench uses the same visual layout as the management pages. Assets keeps filters and selection actions above the gallery, with jobs and duplicate/capacity evidence beside it. Jobs, Diagnostics, Operations, and Presets clear Scope-bound inputs and results when you change context.
+
 ### Stop or restart
 
 ```powershell
@@ -130,6 +134,24 @@ node scripts/verify_frontend_review_regressions.cjs
 ```
 
 The frontend regression script requires a built `frontend/dist` and Chrome or Edge. It uses a fully mocked local service. Live integration scripts have real side effects; read them and confirm their target scope before running them.
+
+[GitHub Actions CI](https://github.com/AsaZhou923/seaweedfs-console/actions/workflows/ci.yml) runs on pushes to `main`, pull requests, and manual dispatch. Ubuntu 24.04 and Windows 2025 run the backend suite, dependency checks, packaging checks, frontend build, bilingual/SSR checks, and mocked Chrome regressions. Windows additionally verifies the PowerShell startup/shutdown scripts. Python 3.12 and Node.js 24 use the committed dependency files; failed Python checks retain JUnit reports for seven days. CI does not access a real SeaweedFS deployment or require server credentials; live integration remains a separate opt-in check.
+
+### Live browser tests with the local e2e checkout
+
+The source checkout's `tests/e2e/live-console.e2e.ts` browser suite consumes the built SDK and web engine from an existing `e2e` checkout; it adds no application dependencies. Set `SWC_E2E_REPO` to that checkout. The fixture helper creates one random `swc-integration-e2e-*` bucket on the endpoint approved by your registry, uploads synthetic images, and creates a fresh local Console database. Management access stays read-only.
+
+In the first terminal, use a fresh artifact directory and an explicitly approved registry:
+
+```powershell
+$env:SWC_E2E_REPO = 'E:\Project Code\useful_repo\e2e'
+$env:SWC_E2E_FIXTURE = 'output/my-e2e-run/live-fixture.json'
+$env:SWC_E2E_OUTPUT = 'output/my-e2e-run/runner'
+rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py prepare --directory output/my-e2e-run --registry output/server-secrets.json
+rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py serve --directory output/my-e2e-run
+```
+
+In a second terminal, set the same three variables and run `rtk proxy node "$env:SWC_E2E_REPO\packages\e2e\dist\cli\bin.js" run --config e2e.config.ts`. Stop the fixture server with Ctrl+C before running `rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py cleanup --directory output/my-e2e-run`. Cleanup touches only the bucket recorded as owned by that fixture and preserves local evidence. Passwords and saved sessions are private runtime data; do not publish the fixture directory.
 
 ### Local bundles
 

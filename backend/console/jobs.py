@@ -237,9 +237,10 @@ def control_job(request: Request, job_id: str, action: str):
 
 def main():
     from .main import create_app
+    from . import jobs as canonical_jobs
     app = create_app()
     while True:
-        if not run_once(app.state.settings):
+        if not canonical_jobs.run_once(app.state.settings):
             time.sleep(1)
 
 

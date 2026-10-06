@@ -623,3 +623,22 @@ rtk proxy .venv/Scripts/python.exe scripts/integration_smoke.py --endpoint http:
 W01 继续为 WATCH：当前 foundation 只有 schema_migrations(version, applied_at)，其他模块以幂等 initializer 和局部兼容 schema 适配初始化。名称/checksum/result 的统一迁移审计，以及正式支持旧版本到当前版本的完整 fixture 矩阵尚未完成。本轮不新增迁移框架、不回填业务历史、不承诺任意旧库升级。R06对旧capacity_snapshots表执行保留行数据的nullable适配，旧数值不改写，以legacy_unknown/measurement在消费层保持未知。新建本地库与本轮明确覆盖的兼容fixture可以按当前测试使用；真实旧库升级应先保留SQLite backup、在副本完成初始化及integrity/FK/count对照，再确定升级范围。R06的测量覆盖兼容回归不能证明全项目迁移审计完成。
 
 本轮仅修复与验证本地实现。全部存储/管理副作用使用 fake adapter 或全模拟 UI；没有重新执行真实 OptiPlex、LANCE Worker 正向、生产全局写入、部署、推送或覆盖历史发布包。原 2026-10-04 的任务验收、截图、311 passed 和发布包是历史证据。目录没有 Git 元数据，源码基线和变更摘要保存在 `output/fix-review-2026-10-05/`。
+
+## 2026-10-06 / Round 31: live e2e and image workbench
+
+- Used the built local `useful_repo/e2e` SDK against an actual HTTP Console, standalone worker, and approved OptiPlex SeaweedFS 4.48, with fresh owned buckets and an isolated database. The final desktop/narrow browser suite passed **14/14**.
+- Fixed the executable worker's split `__main__` / `console.jobs` handler registry. A real `python -m console.jobs` subprocess regression reproduces the old failure and proves the registered enhancement handler executes. New live derived outputs succeeded with verified size/hash; old uncertain test jobs were preserved.
+- Fixed late Scope hydration overriding explicit selection, and Scope/Project state leaks in Scans, Diagnostics, Operations, and Presets. The delayed-response script fails against the preserved original build and passes against the current build. Its Table-details timing issue was corrected in the harness; no management production UI change was needed.
+- Unified the image workbench with management tokens, toolbars, cards, evidence sidebar, and responsive layouts. Batch/group preset tools use native collapsible sections. Actual 1280/595 captures show no document overflow or JavaScript page errors.
+- Final checks: backend **326 passed, 1 warning**, script suite **27 passed**, build/i18n/table-preview/dynamic browser checks passed; i18n covers 1406 messages and 50 SSR views. Independent final review found no blocking issue.
+- Official source/authenticated readback matrix preserves gaps in MQ lists, storage detail pages, some Filer tools, and first-class Iceberg navigation. Empty live data and absent Lance Workers remain limited evidence; full official parity, production global writes, scale, and W01 migration auditing are not claimed.
+- Cleaned all six run-owned buckets (HEAD 404), stopped the fixture API/worker and owned SSH forwarding. Historical packages/data and the deployed Console were preserved. No commit, push, deployment, or new package was requested.
+- Evidence: `output/e2e-2026-10-06/verification-summary.json`, `runner/summary.md`, `official-baseline.md`, before/after screenshots, and scoped cleanup logs. Full [Round 31 record](<E:/Project Code/docs/01 - Projects/seaweedfs-console/05 - Testing/Records/2026-10-06-31-真实E2E与图片工作台修复.md>); progress remains in the development plan.
+
+## 2026-10-06 / Round 32: continuous integration and source publication
+
+- Added `.github/workflows/ci.yml` for main pushes, pull requests, and manual dispatch. Python 3.12 and Node.js 24 run backend/frontend jobs on Ubuntu 24.04 and Windows 2025. Packaging is checked on both; Windows additionally exercises startup/shutdown script regressions.
+- CI includes dependency compatibility, backend behavior, frontend build, bilingual/SSR validation, table rendering, and mocked Chrome request-order regressions. Real SeaweedFS integrations stay opt-in and no server credential is configured in hosted CI.
+- Actions are pinned to verified commit SHAs, checkout does not persist authentication, token permissions are read-only, overlapping runs are cancelled, job durations are bounded, and JUnit artifacts have a seven-day retention period.
+- Local workflow validation: official actionlint 1.7.12 (download checksum verified) and YAML parsing passed; current dependencies passed `pip check`, both README package links passed, and source candidates contained no credential values from the actual registry. Round 31 behavior checks remain valid for unchanged application inputs.
+- Independent CI review found no actionable issue. Hosted results and publication SHA are recorded in the [Round 32 record](<E:/Project Code/docs/01 - Projects/seaweedfs-console/05 - Testing/Records/2026-10-06-32-CI与源码推送.md>) after the push. Runtime output, registries, screenshots, databases, and historical packages are excluded from publication.

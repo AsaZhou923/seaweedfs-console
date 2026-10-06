@@ -293,6 +293,132 @@ nav a:hover:not(.active) {
   box-shadow: var(--shadow);
 }
 
+.imageWorkbench {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.workbenchHeader {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(360px, .9fr);
+  gap: 16px;
+  align-items: start;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workbenchHeader h2 {
+  margin: 2px 0 5px;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.workbenchHeader .hint {
+  max-width: 720px;
+  margin: 0;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.compactMetrics {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+}
+
+.workbenchFilters {
+  margin-bottom: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+}
+
+.workbenchFilters .advancedFilters {
+  background: var(--surface);
+}
+
+.workbenchActions {
+  justify-content: space-between;
+  padding: 10px 0 0;
+}
+
+.assetWorkspace,
+.workbenchSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 14px;
+  align-items: start;
+}
+
+.workbenchSplit {
+  grid-template-columns: minmax(260px, 410px) minmax(0, 1fr);
+}
+
+.assetContent,
+.assetAside,
+.workbenchCard {
+  min-width: 0;
+}
+
+.assetAside,
+.workbenchCard {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+  padding: 12px;
+}
+
+.assetAside {
+  position: sticky;
+  top: 18px;
+}
+
+.workbenchCard.flush {
+  background: var(--surface);
+}
+
+.workbenchCard h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.workbenchDetails {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 0;
+}
+
+.workbenchDetails summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  color: #3f3f46;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.workbenchDetails > :not(summary) {
+  margin-left: 12px;
+  margin-right: 12px;
+}
+
+.workbenchDetails > :last-child {
+  margin-bottom: 12px;
+}
+
 .two {
   display: grid;
   grid-template-columns: minmax(260px, 390px) minmax(0, 1fr);
@@ -1154,13 +1280,24 @@ pre {
 
   .two,
   .grid3,
+  .workbenchHeader,
+  .assetWorkspace,
+  .workbenchSplit,
   .managementGrid.twoColumn,
   .managementGrid.threeColumn { grid-template-columns: 1fr; }
+
+  .assetAside {
+    position: static;
+  }
 
   .filters input,
   .filters select {
     flex: 1 1 150px;
     max-width: none;
+  }
+
+  .workbenchActions {
+    justify-content: flex-start;
   }
 
   .assetGrid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }

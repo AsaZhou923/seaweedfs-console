@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-10-04
+- Last refreshed: 2026-10-06
 - Primary product surfaces: SeaweedFS OSS Admin-compatible management console first; image asset enhancement workbench second. The same app owns both surfaces, but Control Plane management and Project Scope image workflows must stay visually and conceptually distinct.
 - Evidence reviewed:
   - `frontend/package.json`: React 19.3, React DOM 19.3, TypeScript 7, Vite 8.
@@ -261,6 +261,14 @@
   - Image Assets route at `1280x900` and `595px`.
   - Browser console has no errors.
   - Raw official DTO evidence remains accessible but secondary.
+
+## Image enhancement workbench
+
+- Assets, Jobs, Diagnostics, Operations, and Presets share the management console's light neutral tokens, restrained borders, form spacing, and section hierarchy.
+- Keep the image grid primary. Filters and selected-object actions sit above it; recent jobs and duplicate/capacity evidence sit beside it on wide screens and below it on narrow screens.
+- Keep scope context in the shared Project/Scope selector. Page summaries describe the current visible data, rather than repeat that selector or imply a total inventory count.
+- Treat every Scope or Project change as a new request context. Clear bound inputs, results, jobs, versions, upload handles, batches, and selections before rendering the new context; discard late responses from the previous context.
+- Validate populated image and management screens at 1280 and 595 pixels with the live isolated Console. Mocked delayed-response regressions remain separate evidence for request ordering.
 
 ## Open questions
 

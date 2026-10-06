@@ -1,5 +1,7 @@
 # SeaweedFS Console
 
+[![CI](https://github.com/AsaZhou923/seaweedfs-console/actions/workflows/ci.yml/badge.svg)](https://github.com/AsaZhou923/seaweedfs-console/actions/workflows/ci.yml)
+
 **面向 SeaweedFS 集群管理与图片资产工作流的第三方 Web 控制台。**
 
 [English](README.md) | 简体中文
@@ -66,6 +68,8 @@ pwsh -NoProfile -File scripts/start.ps1 -Install
 
 管理写入默认关闭，只开启需要的动作和目标范围。依赖缺失或能力不支持时会明确显示。
 
+图片工作台与管理页面使用统一布局。Assets 将筛选和选择操作放在图库上方，任务、重复与容量证据放在侧栏。Jobs、Diagnostics、Operations 和 Presets 在切换上下文时清空绑定旧 Scope 的输入与结果。
+
 ### 停止或重启
 
 ```powershell
@@ -130,6 +134,24 @@ node scripts/verify_frontend_review_regressions.cjs
 ```
 
 前端回归脚本需要已构建的 `frontend/dist` 和 Chrome 或 Edge，使用本地全模拟服务。真实集成脚本有实际副作用，运行前先阅读脚本并确认目标范围。
+
+[GitHub Actions CI](https://github.com/AsaZhou923/seaweedfs-console/actions/workflows/ci.yml) 在 main 推送、PR 和手动触发时执行。Ubuntu 24.04 与 Windows 2025 运行后端、依赖兼容、打包、前端构建、双语/SSR 和模拟 Chrome 回归；Windows 额外验证 PowerShell 启停脚本。Python 3.12 与 Node.js 24 使用已提交的依赖文件，Python 检查保留七天 JUnit 报告。CI 不接入真实 SeaweedFS 或读取服务器凭据，真实联调保留为单独显式执行的检查。
+
+### 使用本机 e2e 项目进行真实浏览器测试
+
+源码工作区的 `tests/e2e/live-console.e2e.ts` 浏览器套件使用已有 `e2e` 项目构建好的 SDK 和 Web engine，不新增应用依赖。用 `SWC_E2E_REPO` 指定该项目。Fixture 工具在凭据注册表批准的端点新建一个随机 `swc-integration-e2e-*` 桶，写入合成图片，并创建独立本地 Console 数据库；管理连接保持只读。
+
+第一个终端中使用新的产物目录和明确批准的注册表：
+
+```powershell
+$env:SWC_E2E_REPO = 'E:\Project Code\useful_repo\e2e'
+$env:SWC_E2E_FIXTURE = 'output/my-e2e-run/live-fixture.json'
+$env:SWC_E2E_OUTPUT = 'output/my-e2e-run/runner'
+rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py prepare --directory output/my-e2e-run --registry output/server-secrets.json
+rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py serve --directory output/my-e2e-run
+```
+
+第二个终端设置相同的三个变量后，执行 `rtk proxy node "$env:SWC_E2E_REPO\packages\e2e\dist\cli\bin.js" run --config e2e.config.ts`。先在服务终端按 Ctrl+C 停止 fixture，再执行 `rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py cleanup --directory output/my-e2e-run`。清理只操作该 fixture 记录为本轮自有的桶，并保留本地产物。密码与保存的会话属于私有运行数据，不要发布 fixture 目录。
 
 ### 本地包
 
