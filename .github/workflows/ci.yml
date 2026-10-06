@@ -38,6 +38,11 @@ jobs:
           cache-dependency-path: |
             backend/requirements-lock.txt
             backend/requirements-dev.txt
+      - name: Set up Node.js for browser runner lifecycle tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
       - name: Install locked test dependencies
         run: python -m pip install -r backend/requirements-dev.txt
       - name: Check dependency compatibility
@@ -47,9 +52,9 @@ jobs:
       - name: Test Windows startup and packaging
         if: runner.os == 'Windows'
         run: python -m pytest tests/scripts -q -p no:cacheprovider -o addopts= --junitxml=test-results/scripts.xml
-      - name: Test packaging
+      - name: Test packaging and browser runner lifecycle
         if: runner.os == 'Linux'
-        run: python -m pytest tests/scripts/test_package_scripts.py -q -p no:cacheprovider -o addopts= --junitxml=test-results/scripts.xml
+        run: python -m pytest tests/scripts/test_package_scripts.py tests/scripts/test_browser_regression_runner.py -q -p no:cacheprovider -o addopts= --junitxml=test-results/scripts.xml
       - name: Save test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

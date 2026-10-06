@@ -27,6 +27,13 @@ const projectTwoScopes = [
 const assetA = { id: "obj-a-1", asset_id: "asset-a-1", scope_id: "scope-a", bucket: "bucket-a", key: "a/scope-a-photo.jpg", key_display: "scope-a-photo.jpg", revision: "rev-a", version_id: "v-a-1", size_bytes: 12345, content_type: "image/jpeg", properties: { format: "jpeg", width: 640, height: 480, decode_status: "valid" }, preview_state: "ready", reference_status: "unknown" };
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const withTimeout = (promise, ms, label) => {
+  let timeout;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeout));
+};
 const json = (res, value, status = 200) => {
   const body = JSON.stringify(value);
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -223,17 +230,37 @@ async function launchCdp() {
   assert.ok(exe, "Chrome or Edge was not found; set CHROME_PATH to run this check.");
   const port = await freePort();
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "seaweedfs-console-cdp-"));
-  const proc = spawn(exe, [`--remote-debugging-port=${port}`, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
-  for (let i = 0; i < 50; i += 1) {
-    try {
-      const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
-      return { proc, port, profile, browserWSEndpoint: version.webSocketDebuggerUrl };
-    } catch {
-      await wait(100);
+  const args = [`--remote-debugging-port=${port}`, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`, "about:blank"];
+  if (process.env.CI && process.platform === "linux") args.splice(2, 0, "--no-sandbox", "--disable-dev-shm-usage");
+  const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  let stderr = "";
+  proc.stderr?.on("data", (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-4000);
+  });
+  try {
+    const started = Date.now();
+    while (Date.now() - started < 30000) {
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        throw new Error(`Browser exited before exposing DevTools endpoint (code=${proc.exitCode}, signal=${proc.signalCode}). ${stderr.trim()}`);
+      }
+      let timeout;
+      try {
+        const controller = new AbortController();
+        timeout = setTimeout(() => controller.abort(), 1000);
+        const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal });
+        const version = await response.json();
+        return { proc, port, profile, browserWSEndpoint: version.webSocketDebuggerUrl };
+      } catch {
+        await wait(100);
+      } finally {
+        clearTimeout(timeout);
+      }
     }
+    throw new Error(`Browser did not expose a DevTools endpoint within 30000ms. ${stderr.trim()}`);
+  } catch (error) {
+    await stopBrowser({ proc, profile });
+    throw error;
   }
-  proc.kill();
-  throw new Error("Browser did not expose a DevTools endpoint.");
 }
 
 class Cdp {
@@ -285,6 +312,48 @@ async function createPage(browser, url) {
   await page.send("Page.enable");
   await page.send("Runtime.enable");
   return page;
+}
+
+async function stopBrowser(browser, cleanupProfile = true) {
+  if (!browser?.proc) return;
+  const proc = browser.proc;
+  if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+  try {
+    await withTimeout(new Promise((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) resolve();
+      else proc.once("exit", resolve);
+    }), 5000, "browser process exit");
+  } catch (error) {
+    console.warn(`WARN browser graceful cleanup timed out: ${String(error.message || error)}`);
+    if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+    await withTimeout(new Promise((resolve) => {
+      if (proc.exitCode !== null || proc.signalCode !== null) resolve();
+      else proc.once("exit", resolve);
+    }), 2000, "browser process SIGKILL").catch((killError) => console.warn(`WARN browser forced cleanup timed out: ${String(killError.message || killError)}`));
+  }
+  if (cleanupProfile) cleanupBrowserProfile(browser.profile);
+}
+
+function cleanupBrowserProfile(profile) {
+  try {
+    const resolvedProfile = path.resolve(profile);
+    const resolvedTmp = path.resolve(os.tmpdir());
+    const basename = path.basename(resolvedProfile);
+    if (!resolvedProfile.startsWith(`${resolvedTmp}${path.sep}`) || !basename.startsWith("seaweedfs-console-cdp-")) {
+      throw new Error(`Refusing to remove unexpected CDP profile path: ${resolvedProfile}`);
+    }
+    fs.rmSync(resolvedProfile, { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`WARN cleanup skipped: ${String(error.message || error)}`);
+  }
+}
+
+async function closeServer(server) {
+  if (!server) return;
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  await withTimeout(new Promise((resolve) => server.close(resolve)), 5000, "mock HTTP server close")
+    .catch((error) => console.warn(`WARN server cleanup timed out: ${String(error.message || error)}`));
 }
 
 const helpers = `
@@ -425,10 +494,12 @@ async function tableDetailsDiagnostics(page) {
 
 async function main() {
   assert.ok(fs.existsSync(path.join(dist, "index.html")), "Run npm run build --prefix frontend before this regression check.");
-  const server = await startServer();
-  const browser = await launchCdp();
+  let server;
+  let browser;
   let page;
   try {
+    server = await startServer();
+    browser = await launchCdp();
     const base = `http://127.0.0.1:${server.address().port}`;
     authMode = "unauth";
     page = await createPage(browser, `${base}/#assets`);
@@ -589,10 +660,15 @@ async function main() {
     await page.eval(`window.__test.setLabeled("S3 Tables buckets", "Bucket ARN", "arn:seaweed:s3tables:bucket-a")`);
     await waitFor(page, `window.__test.hasLabeled("S3 Tables namespaces", "Namespace")`);
     await page.eval(`window.__test.setLabeled("S3 Tables namespaces", "Namespace", "ns_a")`);
+    await waitUntil(() => requests.some((item) => item.pathname.endsWith("/modules/s3-tables/tables") && item.search.includes("namespace=ns_a")), "S3 Tables tables request for selected namespace");
     await waitFor(page, `window.__test.hasLabeled("S3 Tables tables", "Table name")`);
     await page.eval(`window.__test.setLabeled("S3 Tables tables", "Table name", "table_a")`);
     await page.eval(`window.__test.setLabeled("S3 Tables table details / data preview", "Preview scope", "scope-a")`);
-    await waitFor(page, `![...document.querySelectorAll("button")].find((el) => (el.textContent || "").includes("Read table details"))?.disabled`);
+    try {
+      await waitFor(page, `![...document.querySelectorAll("button")].find((el) => (el.textContent || "").includes("Read table details"))?.disabled`);
+    } catch (error) {
+      throw new Error(`${String((error && error.message) || error)}\n${JSON.stringify(await tableDetailsDiagnostics(page), null, 2)}`);
+    }
     await page.eval(`window.__test.clickButton("Read table details")`);
     await page.eval(`window.__test.setLabeled("S3 Tables tables", "Table name", "table_b")`);
     await wait(1600);
@@ -746,20 +822,8 @@ async function main() {
     console.log(JSON.stringify({ loginStorageClear: loginStorage === "", accessPolicyLocalNoDurableIntent: !accessPolicyWrite.idempotencyKey && !accessPolicyWrite.xIdempotencyKey && !Object.prototype.hasOwnProperty.call(JSON.parse(accessPolicyWrite.body), "idempotency_key"), assets: { initial, empty, scopeB, afterRace }, tablePreviewCleared: true, anomalousReceiptKeys, terminalReceiptKeys, idempotencyKeys: allWrites.map((item) => item.idempotencyKey), bucketCreateHeaderOnly: true, uploadKey: uploads[0].idempotencyKey, requestCount: requests.length }, null, 2));
   } finally {
     if (page) page.close();
-    browser.proc.kill();
-    await new Promise((resolve) => browser.proc.once("exit", resolve));
-    try {
-      const resolvedProfile = path.resolve(browser.profile);
-      const resolvedTmp = path.resolve(os.tmpdir());
-      const basename = path.basename(resolvedProfile);
-      if (!resolvedProfile.startsWith(`${resolvedTmp}${path.sep}`) || !basename.startsWith("seaweedfs-console-cdp-")) {
-        throw new Error(`Refusing to remove unexpected CDP profile path: ${resolvedProfile}`);
-      }
-      fs.rmSync(resolvedProfile, { recursive: true, force: true });
-    } catch (error) {
-      console.warn(`WARN cleanup skipped: ${String(error.message || error)}`);
-    }
-    await new Promise((resolve) => server.close(resolve));
+    await stopBrowser(browser);
+    await closeServer(server);
   }
 }
 
