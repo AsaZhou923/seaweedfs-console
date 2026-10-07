@@ -364,6 +364,17 @@ const helpers = `
     control.dispatchEvent(new Event("input", { bubbles: true }));
     control.dispatchEvent(new Event("change", { bubbles: true }));
   };
+  const labeledPanel = (panelText, labelText) => {
+    const hasLabel = (node) => [...node.querySelectorAll("label")].some((label) => (label.textContent || "").includes(labelText) && label.querySelector("input,select,textarea"));
+    const titled = [...document.querySelectorAll(".panel,.workbenchCard")].find((node) =>
+      (node.querySelector(":scope > h2, :scope > summary")?.textContent || "").includes(panelText));
+    // A loading panel must not borrow a similarly named field from another panel.
+    if (titled) return hasLabel(titled) ? titled : null;
+    return [...document.querySelectorAll(".managementPage,.imageWorkbench,section,div")]
+      .filter((node) => (node.textContent || "").includes(panelText))
+      .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length)
+      .find(hasLabel) || null;
+  };
   window.__test = {
     setControl,
     collectAssets(label) {
@@ -400,11 +411,7 @@ const helpers = `
       setControl(control, value);
     },
     setLabeled(panelText, labelText, value) {
-      const panels = [...document.querySelectorAll(".panel.inlinePanel,.managementPage,.workbenchCard,.imageWorkbench,.panel,section,div")]
-        .filter((node) => (node.textContent || "").includes(panelText))
-        .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length);
-      const panel = panels.find((node) => [...node.querySelectorAll("label")].some((label) => (label.textContent || "").includes(labelText))) ||
-        ((document.body.textContent || "").includes(panelText) ? document.body : null);
+      const panel = labeledPanel(panelText, labelText);
       if (!panel) throw new Error("panel not found: " + panelText);
       const label = [...panel.querySelectorAll("label")].find((node) => (node.textContent || "").includes(labelText));
       if (!label) throw new Error("label not found: " + labelText + " in " + [...panel.querySelectorAll("label")].map((node) => (node.textContent || "").trim()).join(" | "));
@@ -413,11 +420,7 @@ const helpers = `
       setControl(control, value);
     },
     hasLabeled(panelText, labelText) {
-      const panel = [...document.querySelectorAll(".panel.inlinePanel,.managementPage,.workbenchCard,.imageWorkbench,.panel,section,div")]
-        .filter((node) => (node.textContent || "").includes(panelText))
-        .sort((a, b) => (a.textContent || "").length - (b.textContent || "").length)
-        .find((node) => [...node.querySelectorAll("label")].some((label) => (label.textContent || "").includes(labelText)));
-      return !!panel && [...panel.querySelectorAll("label")].some((node) => (node.textContent || "").includes(labelText));
+      return Boolean(labeledPanel(panelText, labelText));
     },
     setFileInput(name, content) {
       const input = document.querySelector('input[type="file"]');
@@ -789,10 +792,11 @@ async function main() {
     assert.equal(JSON.parse(allWrites[1].body).idempotency_key, allWrites[1].idempotencyKey, "native JSON retry body should carry the same idempotency_key");
 
     await page.send("Page.navigate", { url: `${base}/#buckets` });
-    await waitFor(page, `document.body.innerText.includes("Bucket CRUD / guarded writes")`);
+    await waitFor(page, `document.body.innerText.includes("Create a bucket")`);
     await page.eval(helpers);
-    await waitFor(page, `window.__test.hasLabeled("Bucket CRUD / guarded writes", "Bucket")`);
-    await page.eval(`window.__test.setLabeled("Bucket CRUD / guarded writes", "Bucket", "review-created"); window.__test.clickButton("Create bucket")`);
+    await page.eval(`document.querySelector(".actionDisclosure").open = true`);
+    await waitFor(page, `window.__test.hasLabeled("Create a bucket", "Bucket")`);
+    await page.eval(`window.__test.setLabeled("Create a bucket", "Bucket", "review-created"); window.__test.clickButton("Create bucket")`);
     await waitUntil(() => requests.some((item) => item.method === "POST" && item.pathname.endsWith("/management/mgmt-1/buckets")), "bucket create request");
     const bucketCreates = requests.filter((item) => item.method === "POST" && item.pathname.endsWith("/management/mgmt-1/buckets"));
     assert.equal(bucketCreates.length, 1, "bucket create should dispatch exactly once");
@@ -809,9 +813,9 @@ async function main() {
     }
 
     await page.send("Page.navigate", { url: `${base}/#files` });
-    await waitFor(page, `document.body.innerText.includes("File write guard") || document.body.innerText.includes("文件写入守卫")`);
+    await waitFor(page, `document.body.innerText.includes("File operations")`);
     await page.eval(helpers);
-    await waitFor(page, `window.__test.hasLabeled("File write guard", "New folder name") || window.__test.hasLabeled("文件写入守卫", "新目录名")`);
+    await waitFor(page, `window.__test.hasLabeled("File operations", "New folder name")`);
     await page.eval(`window.__test.setFileInput("upload.txt", "hello"); window.__test.clickButton("Upload to current path")`);
     await wait(400);
     const uploads = requests.filter((item) => item.method === "POST" && item.pathname.endsWith("/files/upload"));

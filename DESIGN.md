@@ -3,7 +3,7 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-10-06
+- Last refreshed: 2026-10-07
 - Primary product surfaces: SeaweedFS OSS Admin-compatible management console first; image asset enhancement workbench second. The same app owns both surfaces, but Control Plane management and Project Scope image workflows must stay visually and conceptually distinct.
 - Evidence reviewed:
   - `frontend/package.json`: React 19.3, React DOM 19.3, TypeScript 7, Vite 8.
@@ -134,7 +134,9 @@
   - Navigation: 13px. Forms/body/tables: 14px. Route title: 20-24px.
   - Numeric values use tabular figures.
 - Layout rhythm:
-  - Management desktop: 220px sidebar, 24px main padding, 12px control gaps, 16px section gaps.
+  - Management desktop: 220px sidebar, 22px main padding, 12px control gaps, 16px panel-content gaps, 24px page-section gaps.
+  - Panels use 20px padding on desktop and 16px at narrow widths. Labels have 8px separation from controls; independent form sections have a divider and 24px padding above.
+  - Panel titles, explanatory text, input groups, actions, and evidence occupy separate grid rows. Do not place a save button directly against a control or the next field label.
   - Management tables: compact 42-44px rows.
   - Buttons: 34px height, 6px radius.
   - Cards/panels: max 10px radius; avoid cards inside cards.
@@ -269,6 +271,16 @@
 - Keep scope context in the shared Project/Scope selector. Page summaries describe the current visible data, rather than repeat that selector or imply a total inventory count.
 - Treat every Scope or Project change as a new request context. Clear bound inputs, results, jobs, versions, upload handles, batches, and selections before rendering the new context; discard late responses from the previous context.
 - Validate populated image and management screens at 1280 and 595 pixels with the live isolated Console. Mocked delayed-response regressions remain separate evidence for request ordering.
+
+## Management information hierarchy
+
+- Keep the page order understandable: active context, browsable data, configuration/actions, then raw evidence. Brief descriptions explain the user's task; transport flags and raw DTOs remain secondary.
+- Bucket inventory uses the full content width. A selected-bucket heading identifies the configuration target; current status is distinct from editable drafts. Versioning, Object Lock, lifecycle, and policy each have a description, field, and separate save action.
+- New-bucket creation and selected-bucket owner/quota/deletion use separate disclosures and drafts. Selecting a different bucket or management connection clears the selected-bucket owner/quota draft. Creation inputs do not populate existing-bucket changes.
+- Filer browsing uses the full content width. File tools follow in a collapsible area with separate create, upload, rename, and delete groups. Keep preview/hash and permission guards intact.
+- Live Object context uses a definition list for bucket, authorized root prefix, and current browsing prefix. Each value is labeled once. Without a bound Scope, values remain unknown; an empty prefix means bucket root only after Scope binding is known.
+- Table pagination is a compact footer with first/next actions and muted status text. It does not use a bordered status card or imply that a missing cursor proves inventory completeness.
+- `scripts/verify_ui_layout.cjs` captures populated mocked Buckets, Files, Objects, Dashboard, and Assets. It checks spacing, read-only gates, separated bucket drafts, collapsed evidence, page errors, and document overflow at 1280/595/320 widths, with additional English desktop smoke. These captures are local UI evidence.
 
 ## Open questions
 

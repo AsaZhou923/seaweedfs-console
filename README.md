@@ -70,6 +70,8 @@ Management writes are disabled by default. Enable only the actions and target ra
 
 The image workbench uses the same visual layout as the management pages. Assets keeps filters and selection actions above the gallery, with jobs and duplicate/capacity evidence beside it. Jobs, Diagnostics, Operations, and Presets clear Scope-bound inputs and results when you change context.
 
+Management pages separate browsing, current status, and editable settings. Select a bucket from its inventory to configure it; new-bucket creation and existing-bucket owner/quota controls use separate sections. Filer tools sit below the full-width file list. Live Objects shows the bucket, authorized root prefix, and current browsing prefix together, with raw evidence available in collapsed details.
+
 ### Stop or restart
 
 ```powershell

@@ -220,7 +220,7 @@ function StoragePage({ request, managementId, connection }: { request: Requester
       <DataPanel title={t("Volumes")} loading={volumes.loading} error={volumes.error}>
         <div className="miniGrid"><label className="field">{t("Collection")}<input value={filters.collection} onChange={(event) => setFilters({ ...filters, cursor: "", collection: event.target.value })} placeholder={t("default or collection name")} /></label><label className="field">{t("Readonly")}<select value={filters.readonly} onChange={(event) => setFilters({ ...filters, cursor: "", readonly: event.target.value })}><option value="">{t("全部")}</option><option value="true">{t("readonly")}</option><option value="false">{t("writable")}</option></select></label><label className="field">{t("Disk type")}<input value={filters.disk_type} onChange={(event) => setFilters({ ...filters, cursor: "", disk_type: event.target.value })} placeholder={t("hdd / ssd")} /></label><label className="field">{t("Limit")}<input value={filters.limit} onChange={(event) => setFilters({ ...filters, cursor: "", limit: event.target.value })} /></label></div>
         <DataTable caption="SeaweedFS volume export" columns={["ID", "Collection", "Server", "Disk", "Size", "Files", "Garbage", "Readonly", "Maintenance"]} rows={volumeRows.map((item) => [displayValue(item.id), displayValue(item.collection || "default"), textCell(item.server), displayValue(item.disk_type), formatBytesOrUnknown(item.size), displayValue(item.file_count), percentOrUnknown(item.garbage_ratio), yesNoUnknown(item.read_only), <div className="inlineActions"><button type="button" disabled={!canVolumeWrite} title={canVolumeWrite ? t("提交 read-only 切换并读取 export 核验") : disabledTitle("volume.manage")} onClick={() => volumeAction(() => request(`/management/${managementId}/volumes/${encodeURIComponent(String(item.id))}/actions`, { method: "POST", body: JSON.stringify({ action: "read_only", server_id: String(item.server || ""), read_only: !Boolean(item.read_only) }) }))}>{t("readonly")}</button><button type="button" disabled={!canVolumeWrite} title={canVolumeWrite ? t("vacuum 结果需要操作历史核验") : disabledTitle("volume.manage")} onClick={() => volumeAction(() => request(`/management/${managementId}/volumes/${encodeURIComponent(String(item.id))}/actions`, { method: "POST", body: JSON.stringify({ action: "vacuum", server_id: String(item.server || "") }) }))}>{t("vacuum")}</button></div>])} />
-        <div className="toolbar"><button type="button" disabled={!filters.cursor} onClick={() => setFilters({ ...filters, cursor: "" })}>{t("第一页")}</button><button type="button" disabled={!nextCursor} onClick={() => setFilters({ ...filters, cursor: nextCursor })}>{t("下一页")}</button><StateRow label="Volume cursor" value={nextCursor ? t("有下一页") : t("无下一页或未知")} state={nextCursor ? "reported" : "unknown"} /></div>
+        <PaginationBar firstDisabled={!filters.cursor} nextDisabled={!nextCursor} onFirst={() => setFilters({ ...filters, cursor: "" })} onNext={() => setFilters({ ...filters, cursor: nextCursor })} status={nextCursor ? t("有下一页") : t("无下一页或未知")} />
       </DataPanel>
       <div className="managementGrid twoColumn">
         <DataPanel title={t("Collections")} loading={collections.loading} error={collections.error}><DataTable caption="SeaweedFS collections" columns={["Name", "Logical volumes", "Physical replicas", "Size", "State"]} rows={collectionRows.map((item) => [displayValue(item.name), displayValue(item.logical_volumes), displayValue(item.physical_replicas), formatBytesOrUnknown(item.size_bytes), displayValue(item.state)])} /></DataPanel>
@@ -240,6 +240,7 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   const buckets = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/buckets`), [managementId, refreshKey]);
   const [selected, setSelected] = useState("");
   const [createForm, setCreateForm] = useState({ name: "", region: "us-east-1", advanced: false, owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false, versioning_enabled: false, object_lock_enabled: false, set_default_retention: false, object_lock_mode: "GOVERNANCE", object_lock_duration: "1" });
+  const [bucketForm, setBucketForm] = useState({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false });
   const [setting, setSetting] = useState({ versioning: "Suspended", object_lock_configuration: "{\n  \"ObjectLockEnabled\": \"Enabled\"\n}", lifecycle: "{\n  \"rules\": []\n}", policy: "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": []\n}" });
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
   const rows = array(buckets.data?.items).map(record);
@@ -250,20 +251,22 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   const lifecycle = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const policy = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const createInvalid = createForm.advanced && createForm.set_default_retention && (!Number.isInteger(Number(createForm.object_lock_duration)) || Number(createForm.object_lock_duration) < 1);
+  useEffect(() => { setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false }); }, [managementId, selected]);
   async function bucketWrite(fn: () => Promise<unknown>) {
     const result = await run(setNotice, fn);
     if (result) setRefreshKey((value) => value + 1);
   }
   return (
     <section className="managementPage">
-      <div className="managementGrid twoColumn">
         <DataPanel title={t("Bucket inventory")} loading={buckets.loading} error={buckets.error}>
+          <p className="hint">{t("Select a bucket to inspect its status and edit its configuration below.")}</p>
           <DataTable caption="SeaweedFS buckets" columns={["Bucket", "Owner", "Logical", "Physical", "Versioning", "Lifecycle", "Policy"]} rows={rows.map((item) => [<button type="button" className="linkButton" onClick={() => setSelected(String(item.name || ""))}>{displayValue(item.name)}</button>, displayValue(item.owner), formatBytesOrUnknown(item.logical_size), formatBytesOrUnknown(item.physical_size), displayValue(item.versioning_status || "未知"), displayValue(item.lifecycle_rule_count), displayValue(item.policy_statement_count)])} />
           {!rows.length && <StateRow label="Bucket dynamic inventory" value={buckets.data ? t("空响应；不代表静态 S3 identity 为 0") : t("未知")} state={buckets.data ? "empty_response" : "unknown"} />}
         </DataPanel>
-        <div className="panel inlinePanel">
-          <h2>{t("Bucket CRUD / guarded writes")}</h2>
-          <p className="hint">{t("写入由 management_write_enabled、bucket.manage 和 bucket_write_prefixes 三层控制；删除先由后端确认空桶/版本/分片上传。")}</p>
+        <details className="panel actionDisclosure">
+          <summary>{t("Create a bucket")}<span className="hint">{t("Choose a name and region. Optional initial settings are available under advanced creation.")}</span></summary>
+          <div className="panelContent">
+          <p className="hint">{t("Bucket changes require write access. Deletion is available only after the bucket is confirmed empty, including versions and unfinished uploads.")}</p>
           <label className="field">{t("Bucket")}<input value={createForm.name} onChange={(event) => setCreateForm({ ...createForm, name: event.target.value })} placeholder={t("swc-management-example")} /></label>
           <label className="field">{t("Region")}<input value={createForm.region} onChange={(event) => setCreateForm({ ...createForm, region: event.target.value })} placeholder={t("us-east-1")} /></label>
           <label className="ack"><input type="checkbox" checked={createForm.advanced} onChange={(event) => setCreateForm({ ...createForm, advanced: event.target.checked })} />{" "}{t("高级创建（复合设置非原子；partial / needs_review 后请查操作历史，不自动重发）")}</label>
@@ -277,30 +280,72 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
             <label className="ack"><input type="checkbox" checked={createForm.quota_enabled} onChange={(event) => setCreateForm({ ...createForm, quota_enabled: event.target.checked })} />{" "}{t("quota enabled")}</label>
             {createInvalid && <div className="notice error">{t("Default retention duration days 必须是大于等于 1 的整数。")}</div>}
           </div>}
-          <div className="toolbar"><button type="button" disabled={!canWrite || !createForm.name || createInvalid} title={canWrite ? createForm.advanced ? t("高级创建提交复合设置；partial/needs_review 不会自动重发") : t("普通创建只提交 name/region；quota/owner 单独保存") : disabledTitle("bucket.manage")} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets`, { method: "POST", body: JSON.stringify(bucketCreatePayload(createForm)) }))}>{createForm.advanced ? t("高级创建 Bucket") : t("创建 Bucket")}</button><button type="button" disabled={!canWrite || !selected || !createForm.quota_size} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/quota`, { method: "PUT", body: JSON.stringify({ quota_size: Number(createForm.quota_size), quota_unit: createForm.quota_unit, quota_enabled: createForm.quota_enabled }) }))}>{t("保存 quota")}</button><button type="button" disabled={!canWrite || !selected || !createForm.owner} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/owner`, { method: "PUT", body: JSON.stringify({ owner: createForm.owner }) }))}>{t("保存 owner")}</button><button type="button" disabled={!canWrite || !selected} title={t("删除需要后端确认 bucket 为空、无版本历史、无 multipart 上传")} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}`, { method: "DELETE" }))}>{t("删除空 Bucket")}</button></div>
+          <div className="toolbar"><button type="button" disabled={!canWrite || !createForm.name || createInvalid} title={canWrite ? createForm.advanced ? t("高级创建提交复合设置；partial/needs_review 不会自动重发") : t("普通创建只提交 name/region；quota/owner 单独保存") : disabledTitle("bucket.manage")} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets`, { method: "POST", body: JSON.stringify(bucketCreatePayload(createForm)) }))}>{createForm.advanced ? t("高级创建 Bucket") : t("创建 Bucket")}</button></div>
           <StateRow label="写权限" value={canWrite ? t("已授权") : t("未授权，动作禁用")} state={canWrite ? "reported" : "permission_denied"} />
-        </div>
+          </div>
+        </details>
+      <div className="sectionHeading">
+        <div><p className="eyebrow">{t("Bucket configuration")}</p><h2>{selected || t("Select a bucket")}</h2><p className="hint">{selected ? t("These settings apply to the selected bucket. Each section is saved separately.") : t("Select a bucket from the inventory above to inspect and configure it.")}</p></div>
+        <StatusBadge state={canWrite ? "reported" : "permission_denied"} label={canWrite ? "已授权" : "Read-only access"} />
       </div>
-      <div className="managementGrid twoColumn">
-        <DataPanel title={t("Bucket detail / versioning / lock / lifecycle / policy")} loading={bucketDetail.loading || versioning.loading || objectLock.loading || lifecycle.loading || policy.loading} error={bucketDetail.error || versioning.error || objectLock.error || lifecycle.error || policy.error}>
-          <div className="stateList"><StateRow label="Selected" value={selected || t("未选择")} state={selected ? "reported" : "unknown"} /><StateRow label="Versioning" value={displayValue(versioning.data?.status)} state={versioning.data ? "reported" : "unknown"} /><StateRow label="Object lock" value={displayValue(record(objectLock.data?.object_lock_configuration).ObjectLockEnabled)} state={objectLock.data ? "reported" : "unknown"} /><StateRow label="Lifecycle rules" value={displayValue(countOnlyIfList(record(lifecycle.data).Rules ?? record(lifecycle.data).rules ?? record(lifecycle.data).lifecycle))} state={lifecycle.data ? "reported" : lifecycle.error ? "unsupported" : "unknown"} /><StateRow label="Bucket policy statements" value={displayValue(countOnlyIfList(record(policy.data).Statement ?? record(policy.data).statement ?? record(policy.data).policy))} state={policy.data ? "reported" : policy.error ? "unsupported" : "unknown"} /></div>
+        <DataPanel title={t("Bucket status")} loading={bucketDetail.loading || versioning.loading || objectLock.loading || lifecycle.loading || policy.loading} error={bucketDetail.error || versioning.error || objectLock.error || lifecycle.error || policy.error}>
+          <dl className="bucketFacts">
+            <div><dt>{t("Versioning")}</dt><dd>{displayValue(versioning.data?.status)}</dd></div>
+            <div><dt>{t("Object lock")}</dt><dd>{displayValue(record(objectLock.data?.object_lock_configuration).ObjectLockEnabled)}</dd></div>
+            <div><dt>{t("Lifecycle rules")}</dt><dd>{displayValue(countOnlyIfList(record(lifecycle.data).Rules ?? record(lifecycle.data).rules ?? record(lifecycle.data).lifecycle))}</dd></div>
+            <div><dt>{t("Bucket policy statements")}</dt><dd>{displayValue(countOnlyIfList(record(policy.data).Statement ?? record(policy.data).statement ?? record(policy.data).policy))}</dd></div>
+          </dl>
         </DataPanel>
+      <div className="managementGrid twoColumn">
         <div className="panel inlinePanel">
           <h2>{t("Versioning / Object Lock")}</h2>
+          <section className="formSection">
+          <h3>{t("Versioning")}</h3><p className="hint">{t("Keep previous object versions when objects are replaced or deleted.")}</p>
           <label className="field">{t("Versioning")}<select value={setting.versioning} onChange={(event) => setSetting({ ...setting, versioning: event.target.value })}><option value="Suspended">{t("Suspended")}</option><option value="Enabled">{t("Enabled")}</option></select></label>
-          <button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/versioning`, { method: "PUT", body: JSON.stringify({ status: setting.versioning }) }))}>{t("保存 versioning")}</button>
+          <div className="toolbar"><button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/versioning`, { method: "PUT", body: JSON.stringify({ status: setting.versioning }) }))}>{t("保存 versioning")}</button></div>
+          </section>
+          <section className="formSection">
+          <h3>{t("Object lock")}</h3><p className="hint">{t("Configure retention protection for object versions. Availability depends on the storage service.")}</p>
           <label className="field">{t("Object lock JSON")}<textarea value={setting.object_lock_configuration} onChange={(event) => setSetting({ ...setting, object_lock_configuration: event.target.value })} /></label>
-          <button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/object-lock`, { method: "PUT", body: JSON.stringify({ object_lock_configuration: parseJsonObject(setting.object_lock_configuration, "object_lock_configuration") }) }))}>{t("保存 object lock")}</button>
+          <div className="toolbar"><button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/object-lock`, { method: "PUT", body: JSON.stringify({ object_lock_configuration: parseJsonObject(setting.object_lock_configuration, "object_lock_configuration") }) }))}>{t("保存 object lock")}</button></div>
+          </section>
         </div>
         <div className="panel inlinePanel">
           <h2>{t("Lifecycle / Bucket Policy")}</h2>
-          <p className="hint">{t("读取值保留在证据区；保存/删除由后端 readback 核验，未知配置不显示为 0。")}</p>
+          <section className="formSection">
+          <h3>{t("Lifecycle rules")}</h3><p className="hint">{t("Define when objects expire or move between storage tiers. Load the current value before editing.")}</p>
           <label className="field">{t("Lifecycle JSON")}<textarea value={setting.lifecycle} onChange={(event) => setSetting({ ...setting, lifecycle: event.target.value })} /></label>
           <div className="toolbar"><button type="button" disabled={!lifecycle.data} onClick={() => setSetting({ ...setting, lifecycle: JSON.stringify(lifecycle.data, null, 2) })}>{t("填入读取值")}</button><button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`, { method: "PUT", body: JSON.stringify({ lifecycle: parseJsonObject(setting.lifecycle, "lifecycle") }) }))}>{t("保存 lifecycle")}</button><button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`, { method: "DELETE" }))}>{t("删除 lifecycle")}</button></div>
+          </section>
+          <section className="formSection">
+          <h3>{t("Bucket policy")}</h3><p className="hint">{t("Control who can access this bucket and which actions they can perform.")}</p>
           <label className="field">{t("Bucket policy JSON")}<textarea value={setting.policy} onChange={(event) => setSetting({ ...setting, policy: event.target.value })} /></label>
           <div className="toolbar"><button type="button" disabled={!policy.data} onClick={() => setSetting({ ...setting, policy: JSON.stringify(policy.data, null, 2) })}>{t("填入读取值")}</button><button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`, { method: "PUT", body: JSON.stringify({ policy: parseJsonObject(setting.policy, "policy") }) }))}>{t("保存 policy")}</button><button type="button" disabled={!canWrite || !selected} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`, { method: "DELETE" }))}>{t("删除 policy")}</button></div>
+          </section>
         </div>
       </div>
+      <details className="panel actionDisclosure">
+        <summary>{t("Owner, quota and deletion")}<span className="hint">{t("These actions apply only to the selected bucket.")}</span></summary>
+        <div className="panelContent">
+          <div className="operationSections">
+            <section className="formSection">
+              <h3>{t("Owner")}</h3>
+              <label className="field">{t("Owner")}<input value={bucketForm.owner} onChange={(event) => setBucketForm({ ...bucketForm, owner: event.target.value })} /></label>
+              <div className="toolbar"><button type="button" disabled={!canWrite || !selected || !bucketForm.owner} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/owner`, { method: "PUT", body: JSON.stringify({ owner: bucketForm.owner }) }))}>{t("保存 owner")}</button></div>
+            </section>
+            <section className="formSection">
+              <h3>{t("Quota")}</h3>
+              <div className="miniGrid"><label className="field">{t("Quota")}<input value={bucketForm.quota_size} onChange={(event) => setBucketForm({ ...bucketForm, quota_size: event.target.value })} /></label><label className="field">{t("Unit")}<select value={bucketForm.quota_unit} onChange={(event) => setBucketForm({ ...bucketForm, quota_unit: event.target.value })}><option value="B">{t("B")}</option><option value="KB">{t("KB")}</option><option value="MB">{t("MB")}</option><option value="GB">{t("GB")}</option><option value="TB">{t("TB")}</option></select></label></div>
+              <label className="ack"><input type="checkbox" checked={bucketForm.quota_enabled} onChange={(event) => setBucketForm({ ...bucketForm, quota_enabled: event.target.checked })} />{t("quota enabled")}</label>
+              <div className="toolbar"><button type="button" disabled={!canWrite || !selected || !bucketForm.quota_size} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/quota`, { method: "PUT", body: JSON.stringify({ quota_size: Number(bucketForm.quota_size), quota_unit: bucketForm.quota_unit, quota_enabled: bucketForm.quota_enabled }) }))}>{t("保存 quota")}</button></div>
+            </section>
+          </div>
+          <section className="formSection">
+            <h3>{t("删除空 Bucket")}</h3><p className="hint">{t("Bucket changes require write access. Deletion is available only after the bucket is confirmed empty, including versions and unfinished uploads.")}</p>
+            <div className="toolbar"><button type="button" disabled={!canWrite || !selected} title={t("删除需要后端确认 bucket 为空、无版本历史、无 multipart 上传")} onClick={() => bucketWrite(() => request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}`, { method: "DELETE" }))}>{t("删除空 Bucket")}</button></div>
+          </section>
+        </div>
+      </details>
       <ResultPane error={notice.error} result={notice.result} />
       <EvidenceDetails title={t("Bucket raw DTO")} data={{ list: buckets.data, detail: bucketDetail.data, versioning: versioning.data, objectLock: objectLock.data, lifecycle: lifecycle.data, policy: policy.data }} />
     </section>
@@ -363,15 +408,43 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   }
   return (
     <section className="managementPage">
-      <div className="managementHero"><div><p>{t("Filer / Object Browser")}</p><h2>{t("文件对象浏览")}</h2><span>{t("根路径浏览走 approved Filer endpoint；`/.etc`、`/buckets` raw byte 写入由后端阻止。")}</span></div><StatusBadge state={files.error ? "error" : files.data ? "reported" : "unknown"} label={files.error ? "读取失败" : files.data ? "官方报告" : "未知"} /></div>
-      <div className="managementGrid twoColumn">
+      <div className="managementHero"><div><p>{t("Filer / Object Browser")}</p><h2>{t("文件对象浏览")}</h2><span>{t("Browse Filer directories and files. Protected system paths are shown for reference only.")}</span></div><StatusBadge state={files.error ? "error" : files.data ? "reported" : "unknown"} label={files.error ? "读取失败" : files.data ? "官方报告" : "未知"} /></div>
+      <div className="managementGrid browseLayout">
         <DataPanel title={t("Raw Filer files")} loading={files.loading} error={files.error}>
           <label className="field">{t("路径")}<input value={path} onChange={(event) => { setCursor(""); setPath(event.target.value || "/"); }} /></label>
           <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("选择")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => { setDeleteForm({ path: child, is_directory: directory }); setDeletePreview({ loading: false, error: "", data: null }); }}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && <span className="hint">{t("S3 scoped APIs")}</span>}</div>]; })} />
           {!entries.length && <StateRow label="Files" value={files.data ? t("空响应") : t("未知")} state={files.data ? "empty_response" : "unknown"} />}
-          <div className="toolbar"><button type="button" disabled={!cursor} onClick={() => setCursor("")}>{t("第一页")}</button><button type="button" disabled={!nextCursor} onClick={() => setCursor(nextCursor)}>{t("下一页")}</button><StateRow label="File cursor" value={nextCursor ? t("有下一页") : t("无下一页或未知")} state={nextCursor ? "reported" : "unknown"} /></div>
+          <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={nextCursor ? t("有下一页") : t("无下一页或未知")} />
         </DataPanel>
-        <div className="panel inlinePanel"><h2>{t("文件写入守卫")}</h2><p className="hint">{t("mkdir/upload/rename/delete 只在 file.manage、management_write_enabled 和 file.write_roots 满足时提交；目录删除必须先读取预览并使用返回 hash 确认。")}</p><label className="field">{t("新目录名")}<input value={folderName} onChange={(event) => setFolderName(event.target.value)} /></label><button type="button" disabled={!canFileWrite || !folderName || protectedFilePath(path)} title={canFileWrite ? t("创建目录后 readback") : disabledTitle("file.manage")} onClick={() => fileWrite(() => request(`/management/${managementId}/files/mkdir`, { method: "POST", body: JSON.stringify({ path, folder_name: folderName }) }))}>{t("创建目录")}</button><label className="field">{t("上传文件")}<input type="file" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label><button type="button" disabled={!canFileWrite || !uploadFile || protectedFilePath(path)} onClick={() => fileWrite(upload)}>{t("上传到当前路径")}</button><div className="miniGrid"><label className="field">{t("Source path")}<input value={renameForm.source_path} onChange={(event) => setRenameForm({ ...renameForm, source_path: event.target.value })} /></label><label className="field">{t("Target path")}<input value={renameForm.target_path} onChange={(event) => setRenameForm({ ...renameForm, target_path: event.target.value })} /></label></div><button type="button" disabled={!canFileWrite || !renameForm.source_path || !renameForm.target_path || protectedFilePath(renameForm.source_path) || protectedFilePath(renameForm.target_path)} onClick={() => fileWrite(() => request(`/management/${managementId}/files/rename`, { method: "POST", body: JSON.stringify({ source_path: renameForm.source_path, target_path: renameForm.target_path }) }))}>{t("重命名/移动")}</button><label className="field">{t("删除路径")}<input value={deleteForm.path} onChange={(event) => { setDeleteForm({ path: event.target.value }); setDeletePreview({ loading: false, error: "", data: null }); }} placeholder={t("/safe/path/file-or-dir")} /></label><button type="button" disabled={!deleteForm.path || protectedFilePath(deleteForm.path) || deletePreview.loading} onClick={loadDeletePreview}>{t("读取删除预览")}</button><DeletePreviewPanel preview={deletePreview} /><button type="button" disabled={!canFileWrite || !deleteForm.path || protectedFilePath(deleteForm.path) || (deleteRequiresPreview() && !deletePreviewReady())} onClick={() => fileWrite(() => request(`/management/${managementId}/files/delete`, { method: "POST", body: JSON.stringify(deletePayload()) }))}>{t("确认删除")}</button><StateRow label="/etc / /topics" value={t("受保护，仅显示元数据；不允许打开/下载/写入")} state="permission_denied" /><StateRow label="/buckets" value={t("可目录浏览 metadata；raw S3 bytes 使用 scoped object APIs")} state="permission_denied" /></div>
+        <details className="panel actionDisclosure" open>
+          <summary>{t("文件写入守卫")}<span className="hint">{canFileWrite ? t("Files may be changed only within approved write paths. Preview directory contents before confirming deletion.") : t("Read-only access. Write actions are disabled for this connection.")}</span></summary>
+          <div className="panelContent">
+          <div className="operationSections">
+            <section className="formSection">
+              <h3>{t("创建目录")}</h3><p className="hint">{t("New folders are created inside the current path.")}</p>
+              <label className="field">{t("新目录名")}<input value={folderName} onChange={(event) => setFolderName(event.target.value)} /></label>
+              <div className="toolbar"><button type="button" disabled={!canFileWrite || !folderName || protectedFilePath(path)} title={canFileWrite ? t("创建目录后 readback") : disabledTitle("file.manage")} onClick={() => fileWrite(() => request(`/management/${managementId}/files/mkdir`, { method: "POST", body: JSON.stringify({ path, folder_name: folderName }) }))}>{t("创建目录")}</button></div>
+            </section>
+            <section className="formSection">
+              <h3>{t("上传文件")}</h3><p className="hint">{t("The selected file is uploaded to the current path.")}</p>
+              <label className="field">{t("上传文件")}<input type="file" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>
+              <div className="toolbar"><button type="button" disabled={!canFileWrite || !uploadFile || protectedFilePath(path)} onClick={() => fileWrite(upload)}>{t("上传到当前路径")}</button></div>
+            </section>
+            <section className="formSection">
+              <h3>{t("重命名/移动")}</h3>
+              <div className="miniGrid"><label className="field">{t("Source path")}<input value={renameForm.source_path} onChange={(event) => setRenameForm({ ...renameForm, source_path: event.target.value })} /></label><label className="field">{t("Target path")}<input value={renameForm.target_path} onChange={(event) => setRenameForm({ ...renameForm, target_path: event.target.value })} /></label></div>
+              <div className="toolbar"><button type="button" disabled={!canFileWrite || !renameForm.source_path || !renameForm.target_path || protectedFilePath(renameForm.source_path) || protectedFilePath(renameForm.target_path)} onClick={() => fileWrite(() => request(`/management/${managementId}/files/rename`, { method: "POST", body: JSON.stringify({ source_path: renameForm.source_path, target_path: renameForm.target_path }) }))}>{t("重命名/移动")}</button></div>
+            </section>
+            <section className="formSection">
+              <h3>{t("删除路径")}</h3>
+              <label className="field">{t("删除路径")}<input value={deleteForm.path} onChange={(event) => { setDeleteForm({ path: event.target.value }); setDeletePreview({ loading: false, error: "", data: null }); }} placeholder={t("/safe/path/file-or-dir")} /></label>
+              <div className="toolbar"><button type="button" disabled={!deleteForm.path || protectedFilePath(deleteForm.path) || deletePreview.loading} onClick={loadDeletePreview}>{t("读取删除预览")}</button><button type="button" disabled={!canFileWrite || !deleteForm.path || protectedFilePath(deleteForm.path) || (deleteRequiresPreview() && !deletePreviewReady())} onClick={() => fileWrite(() => request(`/management/${managementId}/files/delete`, { method: "POST", body: JSON.stringify(deletePayload()) }))}>{t("确认删除")}</button></div>
+              <DeletePreviewPanel preview={deletePreview} />
+            </section>
+          </div>
+          <EvidenceDetails title={t("Protected paths")} data={{ "/etc / /topics": t("受保护，仅显示元数据；不允许打开/下载/写入"), "/buckets": t("可目录浏览 metadata；raw S3 bytes 使用 scoped object APIs") }} />
+          </div>
+        </details>
       </div>
       <ResultPane error={notice.error} result={notice.result} />
       <EvidenceDetails title={t("Files raw DTO")} data={files.data} />
@@ -447,8 +520,13 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
       <div className="managementHero"><div><p>{t("Live S3 Object Browser")}</p><h2>{t("实时对象浏览")}</h2><span>{t("在已授权存储范围内浏览对象。")}</span></div><StatusBadge state={mismatch ? "permission_denied" : selectedScope ? "reported" : "not_configured"} label={mismatch ? "权限不足" : selectedScope ? "已绑定" : "未配置"} /></div>
       <div className="managementGrid twoColumn">
         <DataPanel title={t("授权范围")} loading={false} error="">
+          <p className="hint">{t("Choose a storage scope to see its bucket and authorized prefix. Browsing stays within this boundary.")}</p>
           <label className="field">{t("切换 Scope")}<select value={scopeId} onChange={(event) => setScopeId?.(event.target.value)}><option value="">{t("未选择")}</option>{associatedScopes.map((scope) => <option key={scope.id} value={scope.id}>{scope.display_name || `${scope.bucket}/${scope.prefix || ""}`}</option>)}</select></label>
-          <div className="stateList"><StateRow label="Bucket" value={displayValue(selectedScope?.bucket)} state={selectedScope?.bucket ? "reported" : "unknown"} /><StateRow label="Root prefix" value={displayValue(selectedScope?.prefix || "bucket root")} state={selectedScope ? "reported" : "unknown"} /><StateRow label="当前前缀" value={displayValue(prefix || selectedScope?.prefix || "bucket root")} state={selectedScope ? "reported" : "unknown"} /></div>
+          <dl className="contextFacts">
+            <dt>{t("Bucket")}</dt><dd>{displayValue(selectedScope?.bucket)}</dd>
+            <dt>{t("Root prefix")}</dt><dd>{selectedScope ? selectedScope.prefix || t("bucket root") : t("未知")}</dd>
+            <dt>{t("当前前缀")}</dt><dd>{selectedScope ? prefix || selectedScope.prefix || t("bucket root") : t("未知")}</dd>
+          </dl>
           <EvidenceDetails title={t("Scope 绑定证据")} data={{ management_s3_connection: connection?.s3_connection_id, selected_scope_connection: selectedAnyScope?.connection_id, selected_scope_id: scopeId, authorized_scope: selectedScope || null, mismatch }} />
         </DataPanel>
         <div className="panel inlinePanel"><h2>{t("浏览条件")}</h2><label className="field">{t("对象前缀")}<input value={prefix} onChange={(event) => { setCursor(""); setPrefix(event.target.value); }} placeholder={selectedScope?.prefix || "scope prefix"} /></label><div className="miniGrid"><label className="field">{t("分隔符")}<select value={delimiter} onChange={(event) => { setCursor(""); setDelimiter(event.target.value); }}><option value="/">/</option><option value="">{t("不分组")}</option></select></label><label className="field">{t("每页数量")}<input value={limit} onChange={(event) => { setCursor(""); setLimit(event.target.value); }} /></label></div><p className="hint">{t("只能浏览所选 Scope 授权范围内的对象。")}</p></div>
@@ -457,7 +535,7 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
         {folders.length ? <DataTable caption="Live S3 prefixes" columns={["Folder", "Action"]} rows={folders.map((folder) => [<code>{folder}</code>, <button type="button" onClick={() => { setCursor(""); setPrefix(folder); }}>{t("打开")}</button>])} /> : null}
         <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => run(setNotice, () => selectKey(String(item.key || "")))}>{t("查看详情")}</button><a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a></div>])} />
         {!items.length && <StateRow label="Objects" value={objects.data ? t("空响应") : t("未知")} state={objects.data ? "empty_response" : "unknown"} />}
-        <div className="toolbar"><button type="button" disabled={!cursor} onClick={() => setCursor("")}>{t("第一页")}</button><button type="button" disabled={!nextCursor} onClick={() => setCursor(nextCursor)}>{t("下一页")}</button><StateRow label="Total" value={objects.data?.total == null ? t("未知") : displayValue(objects.data.total)} state={objects.data?.total == null ? "unknown" : "reported"} /></div>
+        <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={t("Total: {count}", { count: objects.data?.total == null ? t("未知") : String(objects.data.total) })} />
       </DataPanel>
       {selectedObject && <div className="panel inlinePanel"><h2>{t("对象详情")}</h2><div className="stateList"><StateRow label="Object ID" value={displayValue(selectedObject.id)} state={selectedObject.id ? "reported" : "unknown"} /><StateRow label="Key" value={displayValue(selectedObject.key)} state={selectedObject.key ? "reported" : "unknown"} /><StateRow label="Version" value={displayValue(selectedObject.version_id)} state={selectedObject.version_id ? "reported" : "unknown"} /></div><ObjectVersionDeletePanel request={request} managementId={managementId} connection={connection} scopeId={scopeId} scope={selectedScope} object={selectedObject} /><div className="toolbar"><button type="button" onClick={() => { location.hash = "operations"; }}>{t("对象操作")}</button><button type="button" onClick={() => { location.hash = "assets"; }}>{t("资产检索")}</button></div></div>}
       <ResultPane error={notice.error} result={notice.result} />
@@ -1008,7 +1086,11 @@ function OperationTable({ data }: { data: unknown }) {
 }
 
 function DataPanel({ title, loading, error, children }: { title: string; loading: boolean; error: string; children: React.ReactNode }) {
-  return <div className="panel inlinePanel"><h2>{t(title)}</h2>{loading && <div className="notice">{t("读取中")}</div>}{error && <div className="notice error">{translateMessage(error)}</div>}{!loading && !error ? children : null}</div>;
+  return <div className="panel inlinePanel"><h2>{t(title)}</h2><div className="panelContent">{loading && <div className="notice">{t("读取中")}</div>}{error && <div className="notice error">{translateMessage(error)}</div>}{!loading && !error ? children : null}</div></div>;
+}
+
+function PaginationBar({ firstDisabled, nextDisabled, onFirst, onNext, status }: { firstDisabled: boolean; nextDisabled: boolean; onFirst: () => void; onNext: () => void; status: React.ReactNode }) {
+  return <div className="paginationBar"><div className="paginationActions"><button type="button" disabled={firstDisabled} onClick={onFirst}>{t("第一页")}</button><button type="button" disabled={nextDisabled} onClick={onNext}>{t("下一页")}</button></div><span className="paginationStatus">{status}</span></div>;
 }
 
 function DataTable({ caption, columns, rows, translateColumns = true }: { caption: string; columns: string[]; rows: React.ReactNode[][]; translateColumns?: boolean }) {

@@ -1406,7 +1406,7 @@ function Settings({ request, projects, connections, managementConnections, refre
         <button className={tab === "images" ? "active" : "secondary"} onClick={() => setTab("images")}>{t("Project Scope")}</button>
       </div>
       {tab === "management" && <ManagementSettings request={request} s3Connections={connections} managementConnections={managementConnections} refreshConnections={refreshManagementConnections} />}
-      {tab === "images" && <div className="grid3">
+      {tab === "images" && <div className="grid3 settingsGrid">
         <div>
           <h2>{t("S3 连接")}</h2>
           <label className="field">{t("名称")}<input value={conn.display_name} onChange={(event) => setConn({ ...conn, display_name: event.target.value })} /></label>

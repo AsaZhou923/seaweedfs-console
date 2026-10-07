@@ -18,6 +18,10 @@
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 10px;
+  --space-field: 8px;
+  --space-control: 12px;
+  --space-content: 16px;
+  --space-section: 24px;
   --shadow: 0 1px 2px rgba(24, 24, 27, .04), 0 8px 28px rgba(24, 24, 27, .06);
   font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   background: var(--bg);
@@ -38,7 +42,7 @@
 
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 0;
   background: var(--bg);
   font-variant-numeric: tabular-nums;
 }
@@ -115,8 +119,13 @@ textarea {
   border-radius: var(--radius-md);
   padding: 8px 10px;
   font-size: 14px;
+  min-width: 0;
+  line-height: 1.5;
   outline: none;
 }
+
+input[type="checkbox"],
+input[type="radio"] { width: auto; }
 
 input:focus,
 select:focus,
@@ -130,6 +139,7 @@ a:focus-visible {
 
 textarea {
   min-height: 92px;
+  resize: vertical;
   font-family: Consolas, "Cascadia Mono", monospace;
   font-size: 13px;
 }
@@ -252,7 +262,7 @@ nav a:hover:not(.active) {
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 14px;
+  margin-bottom: var(--space-section);
 }
 
 .topbar h1 {
@@ -277,7 +287,8 @@ nav a:hover:not(.active) {
 
 .field {
   display: grid;
-  gap: 6px;
+  gap: var(--space-field);
+  min-width: 0;
   color: #52525b;
   font-size: 13px;
   font-weight: 500;
@@ -286,11 +297,125 @@ nav a:hover:not(.active) {
 .field.compact { min-width: 180px; }
 
 .panel {
+  display: grid;
+  gap: var(--space-content);
+  align-content: start;
+  min-width: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 14px;
+  padding: 20px;
   box-shadow: var(--shadow);
+}
+
+.panel > * { min-width: 0; }
+
+.panel h2,
+.panel h3 { margin: 0; line-height: 1.4; }
+
+.panel h2 { font-size: 16px; }
+.panel h3 { font-size: 14px; }
+
+.hint { font-size: 13px; line-height: 1.6; }
+.panel .hint { margin: 0; }
+
+.panelContent {
+  display: grid;
+  gap: var(--space-content);
+  min-width: 0;
+}
+
+.formSection {
+  display: grid;
+  gap: var(--space-control);
+  min-width: 0;
+  align-content: start;
+}
+
+.formSection + .formSection {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-section);
+  margin-top: var(--space-field);
+}
+
+.formSection > button,
+.panelContent > button,
+.inlinePanel > button,
+.stack > button { justify-self: start; }
+
+.sectionHeading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: start;
+  gap: var(--space-control);
+  padding-top: var(--space-field);
+}
+
+.sectionHeading h2 { margin: 4px 0 6px; font-size: 18px; }
+.sectionHeading .hint { margin: 0; }
+
+.actionDisclosure > summary {
+  cursor: pointer;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.actionDisclosure > summary .hint {
+  display: block;
+  margin: 6px 0 0;
+  font-weight: 400;
+}
+
+.actionDisclosure[open] > summary {
+  padding-bottom: var(--space-content);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-content);
+}
+
+.operationSections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-section);
+}
+
+.operationSections > .formSection {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.contextFacts {
+  display: grid;
+  grid-template-columns: minmax(96px, .35fr) minmax(0, 1fr);
+  gap: 12px 20px;
+  margin: 0;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  align-items: baseline;
+}
+
+.contextFacts dd { font-size: 13px; color: var(--text); }
+
+.bucketFacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-content);
+  margin: 0;
+}
+
+.bucketFacts > div { display: grid; gap: 8px; min-width: 0; }
+
+.settingsGrid > div {
+  display: grid;
+  gap: var(--space-content);
+  align-content: start;
+  min-width: 0;
 }
 
 .imageWorkbench {
@@ -435,9 +560,31 @@ nav a:hover:not(.active) {
 .toolbar,
 .actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-control);
   flex-wrap: wrap;
   align-items: center;
+}
+
+.paginationBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-control) var(--space-content);
+  justify-content: space-between;
+  align-items: center;
+  padding-top: var(--space-content);
+  border-top: 1px solid var(--border);
+}
+
+.paginationActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-control);
+}
+
+.paginationStatus {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .filters {
@@ -488,8 +635,8 @@ nav a:hover:not(.active) {
 .miniGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
-  gap: 10px;
-  margin: 10px 0;
+  gap: var(--space-control);
+  margin: 0;
 }
 
 .stack {
@@ -588,6 +735,12 @@ nav a:hover:not(.active) {
   margin: 10px 0;
   font-size: 14px;
 }
+
+.panel > .notice,
+.panel > .empty,
+.panelContent > .notice,
+.panelContent > .empty,
+.panel .ack { margin: 0; }
 
 .notice.error,
 .formError {
@@ -934,7 +1087,7 @@ pre {
   display: grid;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
+  gap: var(--space-section);
 }
 
 .managementGrid > * {
@@ -953,7 +1106,7 @@ pre {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  padding: 14px;
+  padding: 20px;
   box-shadow: var(--shadow);
 }
 
@@ -984,7 +1137,8 @@ pre {
 
 .managementGrid {
   display: grid;
-  gap: 14px;
+  gap: 20px;
+  align-items: start;
 }
 
 .managementGrid.twoColumn {
@@ -1001,7 +1155,7 @@ pre {
 
 .inlinePanel h2,
 .managementForm h2 {
-  margin: 0 0 10px;
+  margin: 0;
   font-size: 16px;
 }
 
@@ -1014,7 +1168,7 @@ pre {
 .topologyTree,
 .managementForm {
   display: grid;
-  gap: 10px;
+  gap: var(--space-control);
 }
 
 .dependencyGrid.expanded {
@@ -1046,6 +1200,8 @@ pre {
   color: var(--text);
   font-size: 13px;
 }
+
+.stateRow strong + span { margin-top: 4px; }
 
 .stateRow div span {
   overflow-wrap: anywhere;
@@ -1125,7 +1281,7 @@ pre {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-muted);
-  padding: 12px;
+  padding: 16px;
 }
 
 .inlineActions {
@@ -1253,6 +1409,9 @@ pre {
 
   .main { padding: 12px; }
 
+  .panel,
+  .managementHero { padding: 16px; }
+
   .topbar {
     flex-direction: column;
     align-items: stretch;
@@ -1317,6 +1476,12 @@ pre {
   .sidebar nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .operationSections { grid-template-columns: 1fr; }
+
+  .contextFacts { grid-template-columns: minmax(84px, .4fr) minmax(0, 1fr); gap: 12px; }
+
+  .paginationStatus { flex-basis: 100%; }
 }
 
 .sparkline { width: 100%; max-width: 180px; height: 32px; color: #2563eb; margin-top: 6px; }
