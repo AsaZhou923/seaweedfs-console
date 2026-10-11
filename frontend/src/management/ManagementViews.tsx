@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useRef, useState } from "react";
+import React, { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ResultSummary, StructuredResult } from "../components/ResultSummary";
 import { t, translateMessage, useLocale } from "../i18n";
 
@@ -726,6 +726,27 @@ function MaintenancePage({ request, managementId, connection }: { request: Reque
   const [jobDetail, setJobDetail] = useState<AsyncState<Record<string, unknown>>>({ loading: false, error: "", data: null });
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
   const [form, setForm] = useState({ action: "detect", job_type: "", job_id: "", params: "{}" });
+  const jobTypeGeneration = useRef(0);
+  const jobGeneration = useRef(0);
+  const currentTargets = useRef({ jobType: form.job_type, jobId: form.job_id });
+  currentTargets.current = { jobType: form.job_type, jobId: form.job_id };
+  const [loadedJobType, setLoadedJobType] = useState("");
+  useLayoutEffect(() => {
+    jobTypeGeneration.current += 1;
+    setJobTypeDetail({ loading: false, error: "", data: null });
+    setLoadedJobType("");
+    setForm((old) => ({ ...old, params: "{}" }));
+    setNotice({ error: "", result: null });
+    return () => { jobTypeGeneration.current += 1; };
+  }, [managementId, form.job_type]);
+  useLayoutEffect(() => {
+    jobGeneration.current += 1;
+    setJobDetail({ loading: false, error: "", data: null });
+    setForm((old) => ({ ...old, params: "{}" }));
+    setNotice({ error: "", result: null });
+    return () => { jobGeneration.current += 1; };
+  }, [managementId, form.job_id]);
+  const configMatchesTarget = Boolean(form.job_type && loadedJobType === form.job_type);
   const canExecute = can(connection, "maintenance.execute");
   const status = record(maintenance.data?.status);
   const workers = record(maintenance.data?.workers);
@@ -737,30 +758,45 @@ function MaintenancePage({ request, managementId, connection }: { request: Reque
   const selectedJobType = jobTypeRows.find((item) => String(item.job_type ?? item.type ?? item.name ?? "") === form.job_type);
   const runRows = jobTypeRunRows(jobTypeDetail.data);
   async function maintenanceWrite() {
-    const result = await run(setNotice, () => request(`/management/${managementId}/maintenance/actions`, { method: "POST", body: JSON.stringify(maintenancePayload(form)) }));
+    const typeGeneration = jobTypeGeneration.current;
+    const idGeneration = jobGeneration.current;
+    const result = await run((notice) => {
+      if (typeGeneration === jobTypeGeneration.current && idGeneration === jobGeneration.current) setNotice(notice);
+    }, () => request(`/management/${managementId}/maintenance/actions`, { method: "POST", body: JSON.stringify(maintenancePayload(form)) }));
     if (result) setRefreshKey((value) => value + 1);
   }
   async function loadJobTypeDetail() {
     if (!form.job_type) return;
+    const generation = ++jobTypeGeneration.current;
+    const jobType = form.job_type;
+    setLoadedJobType("");
     setJobTypeDetail({ loading: true, error: "", data: null });
     try {
       const data = await request<Record<string, unknown>>(`/management/${managementId}/maintenance/job-types/${encodeURIComponent(form.job_type)}`);
+      if (generation !== jobTypeGeneration.current || currentTargets.current.jobType !== jobType) return;
+      setLoadedJobType(jobType);
       setJobTypeDetail({ loading: false, error: "", data });
     } catch (err) {
+      if (generation !== jobTypeGeneration.current || currentTargets.current.jobType !== jobType) return;
       setJobTypeDetail({ loading: false, error: String((err as Error).message || err), data: null });
     }
   }
   function loadCurrentConfigIntoEditor() {
+    if (!configMatchesTarget || record(jobTypeDetail.data?.config).status !== "supported") return;
     const config = record(record(jobTypeDetail.data?.config).data);
     setForm((value) => ({ ...value, action: "config_update", params: JSON.stringify(config, null, 2) }));
   }
   async function loadJobDetail() {
     if (!form.job_id) return;
+    const generation = ++jobGeneration.current;
+    const jobId = form.job_id;
     setJobDetail({ loading: true, error: "", data: null });
     try {
       const data = await request<Record<string, unknown>>(`/management/${managementId}/maintenance/jobs/${encodeURIComponent(form.job_id)}`);
+      if (generation !== jobGeneration.current || currentTargets.current.jobId !== jobId) return;
       setJobDetail({ loading: false, error: "", data });
     } catch (err) {
+      if (generation !== jobGeneration.current || currentTargets.current.jobId !== jobId) return;
       setJobDetail({ loading: false, error: String((err as Error).message || err), data: null });
     }
   }
@@ -768,7 +804,7 @@ function MaintenancePage({ request, managementId, connection }: { request: Reque
     <section className="managementPage">
       <div className="managementGrid twoColumn">
         <DataPanel title={t("Worker / Plugin")} loading={maintenance.loading} error={maintenance.error}><div className="stateList"><StateRow label="Plugin configured" value={yesNoUnknown(record(status.data).configured)} state={record(status.data).configured === true ? "reported" : "not_configured"} /><StateRow label="Plugin enabled" value={yesNoUnknown(record(status.data).enabled)} state={record(status.data).enabled === true ? "reported" : "not_configured"} /><StateRow label="Worker count" value={displayValue(record(status.data).worker_count)} state={record(status.data).worker_count == null ? "unknown" : "reported"} /><StateRow label="Source" value="official_admin_plugin_api" state="reported" /></div></DataPanel>
-        <div className="panel inlinePanel"><h2>{t("维护动作")}</h2><p className="hint">{t("detect/run/job execute/expire 只有后端显式授权并写入 operation journal 后才可触发；状态以 receipt 和历史为准。")}</p><div className="miniGrid"><label className="field">{t("Action")}<select value={form.action} onChange={(event) => setForm({ ...form, action: event.target.value })}><option value="detect">{t("detect")}</option><option value="run">{t("run")}</option><option value="config_update">{t("config_update")}</option><option value="job_expire">{t("job_expire")}</option><option value="job_execute">{t("job_execute")}</option></select></label><label className="field">{t("Job type")}<input value={form.job_type} onChange={(event) => setForm({ ...form, job_type: event.target.value })} /></label><label className="field">{t("Job ID")}<input value={form.job_id} onChange={(event) => setForm({ ...form, job_id: event.target.value })} /></label></div><label className="field">{form.action === "config_update" ? "Config JSON" : form.action === "job_execute" ? "Job JSON" : "Params JSON"}<textarea value={form.params} onChange={(event) => setForm({ ...form, params: event.target.value })} /></label><div className="stateList"><StateRow label="Job type registry" value={selectedJobType ? t("已由上游 registry 报告") : form.job_type ? t("未在当前 registry 中找到") : t("未选择")} state={selectedJobType ? "reported" : "unknown"} /><StateRow label="Current config" value={displayValue(record(jobTypeDetail.data?.config).status || (jobTypeDetail.loading ? t("读取中") : t("未读取")))} state={record(jobTypeDetail.data?.config).status === "supported" ? "reported" : jobTypeDetail.error ? "error" : "unknown"} /></div><div className="toolbar"><button type="button" onClick={() => setRefreshKey((value) => value + 1)}>{t("刷新维护证据")}</button><button type="button" disabled={!form.job_type || jobTypeDetail.loading} onClick={loadJobTypeDetail}>{t("读取 JobType 详情")}</button><button type="button" disabled={!form.job_id || jobDetail.loading} onClick={loadJobDetail}>{t("读取 Job ID 详情")}</button><button type="button" disabled={record(jobTypeDetail.data?.config).status !== "supported"} onClick={loadCurrentConfigIntoEditor}>{t("载入 Config 编辑")}</button><button type="button" disabled={!canExecute} title={canExecute ? "提交维护动作" : disabledTitle("maintenance.execute")} onClick={maintenanceWrite}>{t("提交维护动作")}</button></div>{jobTypeDetail.error && <div className="notice error">{jobTypeDetail.error}</div>}<StateRow label="远端授权" value={canExecute ? t("已授权") : t("未授权，动作禁用")} state={canExecute ? "reported" : "permission_denied"} /><EvidenceDetails title={t("选中 Job type 编辑前证据")} data={{ registry: selectedJobType || { state: "unknown", job_type: form.job_type || null, source: "maintenance.job_types" }, detail: jobTypeDetail.data || { state: jobTypeDetail.loading ? "loading" : "unknown" } }} /></div>
+        <div className="panel inlinePanel"><h2>{t("维护动作")}</h2><p className="hint">{t("detect/run/job execute/expire 只有后端显式授权并写入 operation journal 后才可触发；状态以 receipt 和历史为准。")}</p><div className="miniGrid"><label className="field">{t("Action")}<select value={form.action} onChange={(event) => setForm({ ...form, action: event.target.value })}><option value="detect">{t("detect")}</option><option value="run">{t("run")}</option><option value="config_update">{t("config_update")}</option><option value="job_expire">{t("job_expire")}</option><option value="job_execute">{t("job_execute")}</option></select></label><label className="field">{t("Job type")}<input value={form.job_type} onChange={(event) => setForm({ ...form, job_type: event.target.value })} /></label><label className="field">{t("Job ID")}<input value={form.job_id} onChange={(event) => setForm({ ...form, job_id: event.target.value })} /></label></div><label className="field">{form.action === "config_update" ? "Config JSON" : form.action === "job_execute" ? "Job JSON" : "Params JSON"}<textarea value={form.params} onChange={(event) => setForm({ ...form, params: event.target.value })} /></label><div className="stateList"><StateRow label="Job type registry" value={selectedJobType ? t("已由上游 registry 报告") : form.job_type ? t("未在当前 registry 中找到") : t("未选择")} state={selectedJobType ? "reported" : "unknown"} /><StateRow label="Current config" value={displayValue(record(jobTypeDetail.data?.config).status || (jobTypeDetail.loading ? t("读取中") : t("未读取")))} state={record(jobTypeDetail.data?.config).status === "supported" ? "reported" : jobTypeDetail.error ? "error" : "unknown"} /></div><div className="toolbar"><button type="button" onClick={() => setRefreshKey((value) => value + 1)}>{t("刷新维护证据")}</button><button type="button" disabled={!form.job_type || jobTypeDetail.loading} onClick={loadJobTypeDetail}>{t("读取 JobType 详情")}</button><button type="button" disabled={!form.job_id || jobDetail.loading} onClick={loadJobDetail}>{t("读取 Job ID 详情")}</button><button type="button" disabled={!configMatchesTarget || record(jobTypeDetail.data?.config).status !== "supported"} onClick={loadCurrentConfigIntoEditor}>{t("载入 Config 编辑")}</button><button type="button" disabled={!canExecute} title={canExecute ? "提交维护动作" : disabledTitle("maintenance.execute")} onClick={maintenanceWrite}>{t("提交维护动作")}</button></div>{jobTypeDetail.error && <div className="notice error">{jobTypeDetail.error}</div>}<StateRow label="远端授权" value={canExecute ? t("已授权") : t("未授权，动作禁用")} state={canExecute ? "reported" : "permission_denied"} /><EvidenceDetails title={t("选中 Job type 编辑前证据")} data={{ registry: selectedJobType || { state: "unknown", job_type: form.job_type || null, source: "maintenance.job_types" }, detail: jobTypeDetail.data || { state: jobTypeDetail.loading ? "loading" : "unknown" } }} /></div>
       </div>
       <div className="managementGrid threeColumn"><DataPanel title={t("Workers")} loading={maintenance.loading} error={maintenance.error}><DataTable caption="Official plugin workers" columns={["Worker", "Version", "Last seen"]} rows={workerRows.map((item) => [displayValue(item.WorkerID ?? item.worker_id), displayValue(item.WorkerVersion ?? item.version), displayValue(item.LastSeenAt ?? item.last_seen_at)])} /></DataPanel><DataPanel title={t("Job types")} loading={maintenance.loading} error={maintenance.error}><DataTable caption="Official plugin job types" columns={["Type", "Detect", "Run"]} rows={jobTypeRows.map((item) => [displayValue(item.job_type ?? item.type ?? item.name), yesNoUnknown(item.can_detect), yesNoUnknown(item.can_execute)])} /></DataPanel><DataPanel title={t("Activities")} loading={maintenance.loading} error={maintenance.error}><DataTable caption="Official plugin activities" columns={["Stage", "Message", "At"]} rows={activityRows.slice(0, 20).map((item) => [displayValue(item.stage), displayValue(item.message), displayValue(item.occurred_at)])} /></DataPanel></div>
       <div className="managementGrid twoColumn"><DataPanel title={t("JobType 运行历史")} loading={jobTypeDetail.loading} error={jobTypeDetail.error}><DataTable caption="Official plugin job type runs" columns={["Job", "State", "Started", "Updated", "Source"]} rows={runRows.map((item) => [displayValue(item.job_id ?? item.id), displayValue(item.state ?? item.status), displayValue(item.started_at ?? item.created_at), displayValue(item.updated_at ?? item.completed_at), displayValue(item.source ?? record(jobTypeDetail.data?.runs).source)])} />{!runRows.length && <StateRow label="Runs" value={jobTypeDetail.data ? t("空响应或 upstream 未提供 runs") : t("未知")} state={jobTypeDetail.data ? "empty_response" : "unknown"} />}</DataPanel><DataPanel title={t("Job ID 详情")} loading={jobDetail.loading} error={jobDetail.error}><JobDetailPanel data={jobDetail.data} /></DataPanel></div>
