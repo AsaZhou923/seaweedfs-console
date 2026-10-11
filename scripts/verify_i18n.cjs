@@ -122,6 +122,14 @@ async function main() {
       assert.equal(i18n.translateMessage('UPSTREAM_NEW_CODE: Language'), 'UPSTREAM_NEW_CODE: Language');
       assert.ok(invalidLogin.startsWith('UNAUTHENTICATED: '));
       assert.equal(invalidLogin, locale === 'en' ? 'UNAUTHENTICATED: Invalid username or password.' : 'UNAUTHENTICATED: ' + i18n.t('Invalid username or password.'));
+      const scopeValidationMessages = [
+        ['Scope prefix must be a string.', 'Scope 前缀必须是字符串。'],
+        ['Scope policy must be an object.', 'Scope 策略必须是对象。'],
+        ['writable must be a boolean.', 'writable 必须是布尔值。'],
+      ];
+      for (const [english, chinese] of scopeValidationMessages) {
+        assert.equal(i18n.translateMessage(`INVALID_REQUEST: ${english}`), `INVALID_REQUEST: ${locale === 'en' ? english : chinese}`);
+      }
       for (const [name, Component, props] of cases) {
         assert.equal(typeof Component, 'function', `Missing test component ${name}`);
         const html = renderToStaticMarkup(React.createElement(Component, props));
