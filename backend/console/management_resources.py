@@ -492,7 +492,19 @@ def _deleted(_before: Any, after: Any, _response: Any) -> bool:
 
 def _user_fields_match(username: str, expected: Mapping[str, Any]) -> Callable[[Any, Any, Any], bool]:
     def verify(_before: Any, after: Any, _response: Any) -> bool:
-        return isinstance(after, Mapping) and after.get("username") == username and all(after.get(field) == value for field, value in expected.items())
+        if not isinstance(after, Mapping) or after.get("username") != username:
+            return False
+        for field, value in expected.items():
+            if field not in after:
+                return False
+            actual = after[field]
+            # OSS 4.48 serializes empty Go slices as null. Only normalize an
+            # explicitly present, known list field to the requested empty list.
+            if field in {"actions", "policy_names"} and isinstance(value, list) and not value and actual is None:
+                actual = []
+            if actual != value:
+                return False
+        return True
 
     return verify
 
