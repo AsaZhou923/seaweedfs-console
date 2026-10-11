@@ -123,6 +123,13 @@ function App() {
   const pendingUnsafeRequests = useRef(new Set<string>());
 
   function selectProject(nextProjectId: string) {
+    if (projectIdRef.current !== nextProjectId) {
+      scopesRequestRef.current += 1;
+      selectScope("");
+      setScopes([]);
+      setDeriveObjectIds([]);
+      setSelectedObjectIds([]);
+    }
     projectIdRef.current = nextProjectId;
     setProjectId(nextProjectId);
   }
@@ -249,28 +256,27 @@ function App() {
     const list = await request<{ items: Connection[] }>("/connections");
     setConnections(list.items || []);
     await refreshManagementConnections();
-    if (chosenProject) await refreshScopes(chosenProject);
+    if (chosenProject && projectIdRef.current === chosenProject) await refreshScopes(chosenProject);
   }
 
   async function refreshScopes(nextProjectId = projectIdRef.current) {
-    if (!nextProjectId) return;
+    if (!nextProjectId || projectIdRef.current !== nextProjectId) return;
     const requestId = ++scopesRequestRef.current;
-    const previousProjectId = projectIdRef.current;
-    if (previousProjectId !== nextProjectId) {
-      projectIdRef.current = nextProjectId;
-      selectScope("");
-      setScopes([]);
+    try {
+      const result = await request<{ items: Scope[] }>(`/projects/${nextProjectId}/scopes`);
+      if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
+      const items = result.items || [];
+      setScopes(items);
+      setScopeId((current) => {
+        const latest = scopeIdRef.current || current;
+        const next = latest && items.some((scope) => scope.id === latest) ? latest : items[0]?.id || "";
+        scopeIdRef.current = next;
+        return next;
+      });
+    } catch (err) {
+      if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
+      throw err;
     }
-    const result = await request<{ items: Scope[] }>(`/projects/${nextProjectId}/scopes`);
-    if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
-    const items = result.items || [];
-    setScopes(items);
-    setScopeId((current) => {
-      const latest = scopeIdRef.current || current;
-      const next = latest && items.some((scope) => scope.id === latest) ? latest : items[0]?.id || "";
-      scopeIdRef.current = next;
-      return next;
-    });
   }
 
   async function refreshManagementConnections() {
