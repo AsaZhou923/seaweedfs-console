@@ -1249,3 +1249,63 @@ def test_http_admin_iam_ignored_write_and_scope_revocation_are_not_confirmed(tmp
     with db.connect(settings) as conn:
         rows = conn.execute("SELECT path,state FROM management_operations ORDER BY created_at").fetchall()
     assert [(row["path"], row["state"]) for row in rows] == [("/api/groups/team/status", "needs_review")]
+
+
+@pytest.mark.parametrize('field', ['Action', 'NotAction', 'Resource', 'NotResource'])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_iam_and_bucket_policy_verify_standard_singleton_scalar_forms(field, reverse):
+    expected = {'Version': '2012-10-17', 'Statement': [{'Sid': 'keep', 'Effect': 'Allow', field: ['value']}]}
+    actual = {'Version': '2012-10-17', 'Statement': [{'Sid': 'keep', 'Effect': 'Allow', field: 'value'}]}
+    if reverse:
+        expected, actual = actual, expected
+    assert management_resources._policy_document_match('reader', expected)(None, {'name': 'reader', 'document': actual}, {}) is True
+    assert management_resources._bucket_policy_match(expected)(None, {'policy': actual}, {}) is True
+    assert management_resources._policy_document_match('reader', expected)(None, {'name': 'other', 'document': actual}, {}) is False
+
+
+@pytest.mark.parametrize('changed', [
+    {'Effect': 'Deny'},
+    {'Action': 's3:PutObject'},
+    {'Action': ['s3:GetObject', 's3:PutObject']},
+    {'NotAction': 's3:GetObject'},
+    {'Resource': 'arn:aws:s3:::other/*'},
+    {'Resource': None},
+    {'Resource': {}},
+    {'Resource': []},
+    {'Condition': {'StringEquals': {'tag': 'v'}}},
+    {'Sid': 'changed'},
+])
+def test_policy_normalization_preserves_meaningful_mismatches(changed):
+    statement = {'Sid': 'read', 'Effect': 'Allow', 'Action': ['s3:GetObject'], 'Resource': ['arn:aws:s3:::owned/*'],
+                 'Condition': {'StringEquals': {'tag': ['v']}}}
+    expected = {'Version': '2012-10-17', 'Statement': [statement]}
+    actual_statement = {**statement, **changed}
+    if 'NotAction' in changed:
+        actual_statement.pop('Action')
+    actual = {'Version': '2012-10-17', 'Statement': [actual_statement]}
+    assert management_resources._policy_document_match('reader', expected)(None, {'name': 'reader', 'document': actual}, {}) is False
+    assert management_resources._bucket_policy_match(expected)(None, {'policy': actual}, {}) is False
+
+
+def test_http_policy_creation_confirms_oss448_singleton_readback_without_changing_payload(tmp_path, monkeypatch):
+    class SingletonAdmin(HttpIamAdmin):
+        def _handle_api(self, method, path, body, params):
+            result = super()._handle_api(method, path, body, params)
+            if method == 'GET' and path.startswith('/api/object-store/policies/'):
+                result = json.loads(json.dumps(result))
+                for statement in result['document']['Statement']:
+                    for field in ('Action', 'Resource'):
+                        if isinstance(statement.get(field), list) and len(statement[field]) == 1:
+                            statement[field] = statement[field][0]
+            return result
+    admin = SingletonAdmin()
+    _settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    document = {'Version': '2012-10-17', 'Statement': [{'Effect': 'Allow', 'Action': ['s3:GetObject'],
+                                                     'Resource': ['arn:aws:s3:::owned/gallery/*']}]}
+    response = client.post('/api/v1/management/mgmt_http/iam/policies', json={'name': 'reader', 'document': document},
+                           headers={'Idempotency-Key': 'singleton-policy'})
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'confirmed'
+    assert response.json()['result']['readback']['document']['Statement'][0]['Action'] == 's3:GetObject'
+    assert ('POST', '/api/object-store/policies', {'name': 'reader', 'document': document}) in admin.requests
+    assert document['Statement'][0]['Action'] == ['s3:GetObject']

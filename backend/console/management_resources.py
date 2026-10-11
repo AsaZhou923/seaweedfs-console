@@ -599,12 +599,40 @@ def _omits_item(expected: str, *fields: str) -> Callable[[Any, Any, Any], bool]:
     return lambda _before, after, _response: _collection_absent(after, expected, *fields)
 
 
+def _policy_comparison_document(document: Any) -> Any:
+    """Normalize only IAM action/resource scalar-or-list fields for readback.
+
+    OSS 4.48 emits singleton arrays as strings for these standard fields.
+    Preserve every other value, including conditions and arbitrary arrays.
+    """
+    if not isinstance(document, Mapping):
+        return document
+    result = dict(document)
+    statements = result.get("Statement")
+    if not isinstance(statements, list):
+        return result
+    normalized = []
+    for statement in statements:
+        if not isinstance(statement, Mapping):
+            normalized.append(statement)
+            continue
+        item = dict(statement)
+        for field in ("Action", "NotAction", "Resource", "NotResource"):
+            if isinstance(item.get(field), str):
+                item[field] = [item[field]]
+        normalized.append(item)
+    result["Statement"] = normalized
+    return result
+
+
 def _policy_document_match(name: str, document: Mapping[str, Any]) -> Callable[[Any, Any, Any], bool]:
+    expected = _policy_comparison_document(document)
+
     def verify(_before: Any, after: Any, _response: Any) -> bool:
         if not isinstance(after, Mapping) or after.get("name") != name:
             return False
         actual = after.get("document") or after.get("policy") or after.get("Document") or after.get("Policy")
-        return actual == dict(document)
+        return _policy_comparison_document(actual) == expected
 
     return verify
 
@@ -693,13 +721,13 @@ def _normalize_lifecycle_config(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _bucket_policy_match(policy: Mapping[str, Any]) -> Callable[[Any, Any, Any], bool]:
-    expected = dict(policy)
+    expected = _policy_comparison_document(policy)
 
     def verify(_before: Any, after: Any, _response: Any) -> bool:
         if not isinstance(after, Mapping):
             return False
         actual = after.get("policy") or after.get("Policy") or after
-        return actual == expected
+        return _policy_comparison_document(actual) == expected
 
     return verify
 
