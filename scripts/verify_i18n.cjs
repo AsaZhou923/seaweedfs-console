@@ -122,6 +122,8 @@ async function main() {
       assert.equal(i18n.translateMessage('UPSTREAM_NEW_CODE: Language'), 'UPSTREAM_NEW_CODE: Language');
       assert.ok(invalidLogin.startsWith('UNAUTHENTICATED: '));
       assert.equal(invalidLogin, locale === 'en' ? 'UNAUTHENTICATED: Invalid username or password.' : 'UNAUTHENTICATED: ' + i18n.t('Invalid username or password.'));
+      assert.equal(i18n.translateMessage("INVALID_REQUEST: Manifest entry connection does not belong to this Scope."), locale === 'en' ? "INVALID_REQUEST: Manifest entry connection does not belong to this Scope." : "INVALID_REQUEST: 引用清单条目的连接不属于当前 Scope。");
+      assert.equal(i18n.translateMessage("INVALID_REQUEST: manifest entry connection does not match manifest scope"), locale === 'en' ? "INVALID_REQUEST: manifest entry connection does not match manifest scope" : "INVALID_REQUEST: 引用清单条目的连接与清单 Scope 不一致。");
       for (const [name, Component, props] of cases) {
         assert.equal(typeof Component, 'function', `Missing test component ${name}`);
         const html = renderToStaticMarkup(React.createElement(Component, props));

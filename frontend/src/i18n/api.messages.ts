@@ -1,6 +1,8 @@
 type Message = { en: string; "zh-CN": string };
 
 export const apiMessages: Record<string, Message> = {
+  "Manifest entry connection does not belong to this Scope.": { en: "Manifest entry connection does not belong to this Scope.", "zh-CN": "引用清单条目的连接不属于当前 Scope。" },
+  "manifest entry connection does not match manifest scope": { en: "manifest entry connection does not match manifest scope", "zh-CN": "引用清单条目的连接与清单 Scope 不一致。" },
   "Admin client cannot fetch worker preview HTML": { en: "Admin client cannot fetch worker preview HTML", "zh-CN": "Admin 客户端无法获取 worker 预览 HTML。" },
   "Admin endpoint does not match the server-side secret binding.": { en: "Admin endpoint does not match the server-side secret binding.", "zh-CN": "Admin 端点与服务端密钥绑定不匹配。" },
   "Admin endpoint is not allowlisted for this SeaweedFS baseline.": { en: "Admin endpoint is not allowlisted for this SeaweedFS baseline.", "zh-CN": "此 SeaweedFS 基线未允许该 Admin 端点。" },

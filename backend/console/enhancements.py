@@ -1605,7 +1605,9 @@ def _normalize_reference_manifest_entry(
         normalized["bucket"] = bucket
     elif normalized.get("bucket") is None and scope_identity.get("bucket"):
         normalized["bucket"] = scope_identity["bucket"]
-    if scope_identity.get("connection_id") and not normalized.get("connection_id"):
+    if scope_identity.get("connection_id"):
+        if normalized.get("connection_id") and normalized["connection_id"] != scope_identity["connection_id"]:
+            raise ValidationError("manifest entry connection does not match manifest scope")
         normalized["connection_id"] = scope_identity["connection_id"]
     return normalized
 
@@ -2111,4 +2113,3 @@ except Exception:  # pragma: no cover - exercised implicitly when FastAPI is abs
     router = None
 else:
     router = APIRouter()
-

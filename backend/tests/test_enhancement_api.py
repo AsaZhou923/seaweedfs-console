@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.console import core, db, enhancement_api, enhancements, jobs
+from backend.console.security import AppError
 
 
 class Body(io.BytesIO):
@@ -668,3 +669,18 @@ def test_capacity_trends_orders_manual_snapshots_by_insert_when_observed_at_ties
     assert [item["id"] for item in trends["manual_snapshots"][:2]] == ["newer", "older"]
     assert trends["manual_snapshots"][0]["unknown_bytes"] == 5
     assert trends["manual_snapshots"][0]["unknown_fields"] == ["source_bytes", "temporary_bytes", "version_bytes"]
+
+
+def test_manifest_connection_identity_must_match_authoritative_scope(settings):
+    setup_variant(settings)
+    entry = {'connection_id': 'foreign-connection', 'key': 'in.jpg', 'entity_type': 'p', 'entity_id': '1', 'role': 'primary'}
+    with db.connect(settings) as conn:
+        scope = core.ensure_scope_permission(conn, 's', 'object:read')
+        with pytest.raises(AppError) as error:
+            enhancement_api._validate_manifest_entries(conn, scope, [entry])
+        assert error.value.status == 422
+        enhancements.initialize(conn)
+        manifest = enhancements.start_reference_manifest(conn, scope_id='s', schema_version=1, coverage={'scope_id': 's', 'bucket': 'bucket', 'prefix': ''}, declared_count=1, waterline='2026-10-10T00:00:00Z')
+        with pytest.raises(enhancements.ValidationError):
+            enhancements.import_reference_manifest_entries(conn, manifest_id=manifest['id'], entries=[entry])
+        assert conn.execute('SELECT count(*) FROM reference_manifest_entries').fetchone()[0] == 0
