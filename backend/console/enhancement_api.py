@@ -904,6 +904,10 @@ async def multipart_part(request: Request, scope_id: str, upload_id: str, part_n
     if not data:
         raise AppError("INVALID_PART_SIZE", "part 大小必须在 1B 到 64MiB 之间。", 422)
     with db.connect(request.app.state.settings) as conn:
+        current_scope = core.ensure_scope_permission(conn, scope_id, "object:write")
+        if any(current_scope[field] != scope[field] for field in ("authz_epoch", "connection_id", "bucket", "prefix")):
+            raise AppError("FORBIDDEN_SCOPE", "Scope authorization changed while receiving the upload part.", 403)
+        scope = current_scope
         upload = _upload_for_scope(conn, scope, upload_id)
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         return adapter.upload_part(scope["bucket"], upload["key"], upload["upload_id"], part_number, data)
