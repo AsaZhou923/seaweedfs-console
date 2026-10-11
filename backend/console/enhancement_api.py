@@ -1008,6 +1008,7 @@ def put_metadata(request: Request, scope_id: str, object_id: str, body: dict[str
                 source_bucket=scope["bucket"],
                 source_key=obj["key"],
                 source_version_id=obj.get("version_id"),
+                expected_source_revision=obj["revision"],
                 target_bucket=scope["bucket"],
                 target_key=target_key,
                 metadata=body.get("metadata", {}),
