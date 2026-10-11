@@ -1060,14 +1060,14 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
         <h2>{t("multipart 上传")}</h2>
         <label className="field">{t("目标 Key")}<input value={upload.key} onChange={(event) => setUpload({ ...upload, key: event.target.value })} placeholder="prefix/new-image.webp" /></label>
         <label className="field">{t("Metadata JSON")}<textarea value={upload.metadata} onChange={(event) => setUpload({ ...upload, metadata: event.target.value })} /></label>
-        <button disabled={!scopeId || !upload.key} onClick={() => run("multipart.init", initUpload)}>{t("初始化")}</button>
+        <button disabled={!scopeId || !scopeWritable || !upload.key} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.init", initUpload)}>{t("初始化")}</button>
         <label className="field">{t("Upload ID")}<input value={upload.uploadId} onChange={(event) => setUpload({ ...upload, uploadId: event.target.value })} /></label>
         <label className="field">{t("Part Number")}<input type="number" min="1" value={partNumber} onChange={(event) => setPartNumber(event.target.value)} /></label>
         <label className="field">{t("Part 文件")}<input type="file" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
         <div className="toolbar">
-          <button disabled={!scopeId || !upload.uploadId || !file} onClick={() => run("multipart.part", uploadPart)}>{t("上传 part")}</button>
-          <button disabled={!scopeId || !upload.uploadId} onClick={() => run("multipart.complete", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/complete`, { method: "POST", body: JSON.stringify({ parts: parseJsonArray(upload.parts, "parts") }) }))}>{t("Complete")}</button>
-          <button disabled={!scopeId || !upload.uploadId} onClick={() => run("multipart.abort", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/abort`, { method: "POST", body: "{}" }))}>{t("Abort")}</button>
+          <button disabled={!scopeId || !scopeWritable || !upload.uploadId || !file} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.part", uploadPart)}>{t("上传 part")}</button>
+          <button disabled={!scopeId || !scopeWritable || !upload.uploadId} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.complete", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/complete`, { method: "POST", body: JSON.stringify({ parts: parseJsonArray(upload.parts, "parts") }) }))}>{t("Complete")}</button>
+          <button disabled={!scopeId || !scopeWritable || !upload.uploadId} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.abort", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/abort`, { method: "POST", body: "{}" }))}>{t("Abort")}</button>
         </div>
         <label className="field">{t("Complete parts JSON")}<textarea value={upload.parts} onChange={(event) => setUpload({ ...upload, parts: event.target.value })} placeholder='[{"PartNumber":1,"ETag":"..."}]' /></label>
       </div><ResultPane error={error} result={result} /></div>}
