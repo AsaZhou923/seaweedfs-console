@@ -403,7 +403,7 @@ function App() {
           </div>}
         </header>
         {error && <div className="notice error">{translateMessage(error)}<button onClick={() => setError("")}>×</button></div>}
-        {managementRoute && (managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={(objectId) => { setSelectedObjectIds([objectId]); setOperationTab("object"); }} />)}
+        {managementRoute && (managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={selectScope} onObjectSelected={(objectId) => { setSelectedObjectIds(objectId ? [objectId] : []); if (objectId) setOperationTab("object"); }} />)}
         {route === "assets" && <Assets request={request} scopeId={scopeId} projectId={projectId} onSelectionChange={setSelectedObjectIds} sendToOperationsCopy={(ids) => { setSelectedObjectIds(ids); setOperationTab("copy"); location.hash = "operations"; }} sendToPresets={(ids) => { setDeriveObjectIds(ids); location.hash = "presets"; }} />}
         {route === "scans" && <Scans request={request} scopeId={scopeId} onChanged={() => refreshScopes(projectId)} />}
         {route === "diagnostics" && <Diagnostics request={request} scopeId={scopeId} />}
