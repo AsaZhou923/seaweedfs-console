@@ -216,7 +216,10 @@ def control_job(request: Request, job_id: str, action: str):
         row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not row:
             raise AppError("JOB_NOT_FOUND", "任务不存在", 404)
-        core.require_scope(request, row["scope_id"])
+        # mutation() already authenticated the session before this write lock.
+        # Recheck Scope authorization on this connection to avoid a second
+        # session last_seen_at write blocking on our own transaction.
+        core.ensure_scope_permission(conn, row["scope_id"], "object:read")
         state, stamp = row["state"], now()
         if action in ("cancel", "pause") and state in ("queued", "running", "paused"):
             column = "cancel_requested_at" if action == "cancel" else "pause_requested_at"

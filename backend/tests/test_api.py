@@ -381,3 +381,60 @@ def test_connection_create_rejects_secret_without_approved_endpoint(tmp_path: Pa
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "SECRET_ENDPOINT_REQUIRED"
         assert client.get("/api/v1/connections").json()["items"] == []
+
+
+def test_job_controls_with_real_session_and_repeated_requests(api):
+    client, app, _fake = api
+    csrf = login(client)
+    _, _, scope_id = create_scope(client, csrf)
+    headers = authed_headers(csrf)
+    submitted = client.post(f"/api/v1/scopes/{scope_id}/scans", json={}, headers=headers)
+    assert submitted.status_code == 200, submitted.text
+    job_id = submitted.json()["id"]
+
+    def control(action, expected_state, status=200):
+        response = client.post(f"/api/v1/jobs/{job_id}/{action}", headers=headers)
+        assert response.status_code == status, response.text
+        if status == 200:
+            assert response.json()["state"] == expected_state
+        return response
+
+    control("pause", "paused")
+    control("pause", "paused")
+    control("resume", "queued")
+    control("resume", None, 409)
+    with db.connect(app.state.settings) as conn:
+        running = jobs.claim(conn)
+    assert running["id"] == job_id
+    control("pause", "running")
+    control("pause", "running")
+    with db.connect(app.state.settings) as conn:
+        jobs.checkpoint(conn, running, state="running")
+    assert client.get(f"/api/v1/jobs/{job_id}").json()["state"] == "paused"
+    control("resume", "queued")
+    with db.connect(app.state.settings) as conn:
+        running = jobs.claim(conn)
+    control("cancel", "running")
+    control("cancel", "running")
+    with db.connect(app.state.settings) as conn:
+        jobs.checkpoint(conn, running, state="running")
+    control("cancel", "cancelled")
+    control("cancel", "cancelled")
+    control("resume", None, 409)
+
+
+def test_job_control_checks_scope_and_csrf_before_changing_state(api):
+    client, app, _fake = api
+    csrf = login(client)
+    _, _, scope_id = create_scope(client, csrf)
+    submitted = client.post(f"/api/v1/scopes/{scope_id}/scans", json={}, headers=authed_headers(csrf))
+    assert submitted.status_code == 200, submitted.text
+    job_id = submitted.json()["id"]
+    assert client.post(f"/api/v1/jobs/{job_id}/pause", headers={"Origin": "http://testserver"}).status_code == 403
+    with db.connect(app.state.settings) as conn:
+        conn.execute("UPDATE scopes SET is_active=0,archived_at=? WHERE id=?", (jobs.now(), scope_id))
+    blocked = client.post(f"/api/v1/jobs/{job_id}/pause", headers=authed_headers(csrf))
+    assert blocked.status_code in (403, 404), blocked.text
+    with db.connect(app.state.settings) as conn:
+        row = conn.execute("SELECT state,pause_requested_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+    assert dict(row) == {"state": "queued", "pause_requested_at": None}
