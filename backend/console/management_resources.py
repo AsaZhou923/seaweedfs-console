@@ -1021,8 +1021,13 @@ def create_bucket(request: Request, management_id: str, body: dict[str, Any]):
 @router.delete("/{management_id}/buckets/{bucket}")
 def delete_bucket(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    _ensure_empty_bucket_for_delete(request, mgmt, bucket)
     s3 = _associated_s3(request, mgmt)
+    def invoke():
+        # Replay a persisted receipt before consulting a bucket that the first
+        # attempt may already have deleted.
+        _ensure_empty_bucket_for_delete(request, mgmt, bucket)
+        return s3.delete_bucket(Bucket=bucket)
+
     try:
         return _mutate(
             request,
@@ -1031,7 +1036,7 @@ def delete_bucket(request: Request, management_id: str, bucket: str):
             method="DELETE",
             path=f"/s3/buckets/{_q(bucket)}",
             payload={"bucket": bucket},
-            invoke=lambda: s3.delete_bucket(Bucket=bucket),
+            invoke=invoke,
             readback=_s3_bucket_readback(s3, bucket),
             verify=_deleted,
         )

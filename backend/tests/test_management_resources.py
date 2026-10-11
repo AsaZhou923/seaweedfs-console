@@ -1249,3 +1249,40 @@ def test_http_admin_iam_ignored_write_and_scope_revocation_are_not_confirmed(tmp
     with db.connect(settings) as conn:
         rows = conn.execute("SELECT path,state FROM management_operations ORDER BY created_at").fetchall()
     assert [(row["path"], row["state"]) for row in rows] == [("/api/groups/team/status", "needs_review")]
+
+
+def test_bucket_delete_replays_persisted_receipt_without_rechecking_missing_bucket(tmp_path, monkeypatch):
+    admin = HttpIamAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    with db.connect(settings) as conn:
+        conn.execute('UPDATE management_connections SET permissions_json=?',
+                     (json.dumps({'bucket.manage': True, 'bucket_write_prefixes': ['photos']}),))
+    s3 = FakeS3()
+    original_list = s3.list_objects_v2
+
+    def list_objects(**kwargs):
+        if s3.deleted:
+            raise S3Error('NoSuchBucket')
+        return original_list(**kwargs)
+
+    monkeypatch.setattr(s3, 'list_objects_v2', list_objects)
+    monkeypatch.setattr(management, 'associated_s3_client', lambda *args: s3)
+    url = '/api/v1/management/mgmt_http/buckets/photos'
+    missing_key = client.delete(url)
+    assert missing_key.status_code == 422
+    assert missing_key.json()['error']['code'] == 'IDEMPOTENCY_KEY_REQUIRED'
+    assert s3.calls == []
+    first = client.delete(url, headers={'Idempotency-Key': 'delete-once'})
+    assert first.status_code == 200, first.text
+    assert first.json()['status'] == 'confirmed'
+    calls = list(s3.calls)
+    replay = client.delete(url, headers={'Idempotency-Key': 'delete-once'})
+    assert replay.status_code == 200, replay.text
+    assert replay.json()['replayed'] is True
+    assert replay.json()['operation_id'] == first.json()['operation_id']
+    assert replay.json()['status'] == 'confirmed'
+    assert s3.calls == calls
+    conflict = client.delete(url + '-other', headers={'Idempotency-Key': 'delete-once'})
+    assert conflict.status_code == 409
+    assert conflict.json()['error']['code'] == 'IDEMPOTENCY_CONFLICT'
+    assert s3.calls == calls
