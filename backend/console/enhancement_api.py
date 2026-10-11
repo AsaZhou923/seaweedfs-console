@@ -28,10 +28,18 @@ class S3EnhancementAdapter:
         except Exception as exc:
             raise storage.sanitize_storage_exception(exc) from exc
 
-    def get_object_bytes(self, bucket: str, key: str, version_id: str | None = None, max_bytes: int = 32 * 1024 * 1024) -> bytes:
+    def get_object_bytes_if_match(self, bucket: str, key: str, version_id: str | None, etag: str) -> bytes:
+        if not isinstance(etag, str) or not etag:
+            raise enhancements.CapabilityUnsupported("conditional source reads require an ETag")
+        return self.get_object_bytes(bucket, key, version_id, if_match=etag)
+
+
+    def get_object_bytes(self, bucket: str, key: str, version_id: str | None = None, max_bytes: int = 32 * 1024 * 1024, *, if_match: str | None = None) -> bytes:
         kwargs = {"Bucket": bucket, "Key": key}
         if _version_id_provided(version_id):
             kwargs["VersionId"] = version_id
+        if if_match is not None:
+            kwargs["IfMatch"] = if_match
         try:
             response = self.s3.get_object(**kwargs)
             body = response["Body"]

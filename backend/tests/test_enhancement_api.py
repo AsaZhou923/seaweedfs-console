@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.console import core, db, enhancement_api, enhancements, jobs
+from backend.console.security import AppError
 
 
 class Body(io.BytesIO):
@@ -41,6 +42,8 @@ class FakeS3:
         return {k: v for k, v in item.items() if k != "Body"}
 
     def get_object(self, Bucket, Key, **kwargs):
+        if 'IfMatch' in kwargs and kwargs['IfMatch'] != self.objects[(Bucket, Key)]['ETag']:
+            raise FakeClientError(412)
         return {"Body": Body(self.objects[(Bucket, Key)]["Body"])}
 
     def put_object(self, Bucket, Key, Body, Metadata, ContentType, IfNoneMatch=None):
@@ -435,10 +438,15 @@ def test_restore_literal_null_version_reads_null_not_current():
             version = version_id if version_id is not None else self.current[(bucket, key)]
             return b"null-version" if version == "null" else b"current-version"
 
+        def get_object_bytes_if_match(self, bucket, key, version_id, etag):
+            assert version_id == 'null' and etag == 'null-etag'
+            return self.get_object_bytes(bucket, key, version_id)
+
         def put_object(self, bucket, key, data, metadata, content_type):
             self.put_body = data
 
     adapter = NullRestoreAdapter()
+    adapter.objects[('b', 'source', 'null')]['etag'] = 'null-etag'
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     result = enhancements.restore_object_version(conn, adapter, scope_id="s1", bucket="b", key="source", version_id="null", target_key="restored")
@@ -668,3 +676,57 @@ def test_capacity_trends_orders_manual_snapshots_by_insert_when_observed_at_ties
     assert [item["id"] for item in trends["manual_snapshots"][:2]] == ["newer", "older"]
     assert trends["manual_snapshots"][0]["unknown_bytes"] == 5
     assert trends["manual_snapshots"][0]["unknown_fields"] == ["source_bytes", "temporary_bytes", "version_bytes"]
+
+
+def test_metadata_copy_conditional_get_rejects_intervening_source_before_target_put(settings, monkeypatch):
+    setup_variant(settings)
+
+    class RacingS3(FakeS3):
+        source_gets = []
+
+        def get_object(self, Bucket, Key, **kwargs):
+            if Key == 'in.jpg':
+                self.source_gets.append(dict(kwargs))
+                # A newer revision becomes current after both preliminary heads.
+                original = dict(self.objects[(Bucket, Key)])
+                self.objects[(Bucket, Key)].update(Body=b'foreign', ETag='"foreign"', ContentLength=7)
+                try:
+                    return super().get_object(Bucket=Bucket, Key=Key, **kwargs)
+                finally:
+                    # Restore A to demonstrate that a later HEAD alone cannot guard the GET.
+                    self.objects[(Bucket, Key)] = original
+            return super().get_object(Bucket=Bucket, Key=Key, **kwargs)
+
+    fake = RacingS3()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
+    monkeypatch.setattr(enhancement_api, 'mutation', lambda request: SimpleNamespace(id='admin'))
+
+    def require_scope(request, scope_id, **kwargs):
+        with db.connect(settings) as conn:
+            return core.ensure_scope_permission(conn, scope_id, 'object:write')
+
+    def require_object(request, scope_id, object_id):
+        with db.connect(settings) as conn:
+            return core.get_object(conn, scope_id, object_id)
+
+    monkeypatch.setattr(enhancement_api, '_require_scope', require_scope)
+    monkeypatch.setattr(core, 'require_object', require_object)
+    monkeypatch.setattr(enhancement_api, '_adapter_for_scope', lambda *args: enhancement_api.S3EnhancementAdapter(fake))
+    with pytest.raises(AppError) as error:
+        enhancement_api.put_metadata(request, 's', 'o', {'target_key': 'new.jpg', 'metadata': {}})
+    assert error.value.status == 412
+    assert fake.source_gets == [{'IfMatch': '"source-etag"'}]
+    assert fake.puts == 0 and ('bucket', 'new.jpg') not in fake.objects
+
+
+
+@pytest.mark.parametrize('version_id', [None, 'null', 'v123'])
+def test_conditional_adapter_read_preserves_exact_version_and_etag(version_id):
+    class RecordingS3:
+        def get_object(self, **kwargs):
+            self.kwargs = kwargs
+            return {'Body': Body(b'source')}
+    s3 = RecordingS3()
+    adapter = enhancement_api.S3EnhancementAdapter(s3)
+    assert adapter.get_object_bytes_if_match('bucket', 'key', version_id, '"etag"') == b'source'
+    assert s3.kwargs == {'Bucket': 'bucket', 'Key': 'key', 'IfMatch': '"etag"', **({'VersionId': version_id} if version_id is not None else {})}

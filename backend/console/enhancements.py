@@ -1164,6 +1164,11 @@ def copy_object_safely(
         observed_revision = make_observed_revision(source_bucket, source_key, source_head, source_version_id)
         if observed_revision != expected_source_revision:
             raise ConflictError("source object revision does not match selected index revision")
+    source_etag = _get_attr(source_head, "etag")
+    conditional_read = getattr(adapter, "get_object_bytes_if_match", None)
+    if not isinstance(source_etag, str) or not source_etag or not callable(conditional_read):
+        raise CapabilityUnsupported("safe copy requires an ETag and conditional source-read adapter support")
+    bound_version = source_version_id if source_version_id is not None else _get_attr(source_head, "version_id")
     with _transaction(conn):
         intent_id, _ = _operation_intent(
             conn,
@@ -1175,8 +1180,8 @@ def copy_object_safely(
             },
         )
     try:
-        data = _call_required(adapter, "get_object_bytes", source_bucket, source_key, source_version_id)
-        fresh_source = _call_required(adapter, "head_object", source_bucket, source_key, source_version_id)
+        data = conditional_read(source_bucket, source_key, bound_version, source_etag)
+        fresh_source = _call_required(adapter, "head_object", source_bucket, source_key, bound_version)
         _verify_copy_result(source_head, fresh_source)
         content_type = _get_attr(source_head, "content_type") or "application/octet-stream"
         merged_metadata = dict(_get_attr(source_head, "metadata") or {})
@@ -2111,4 +2116,3 @@ except Exception:  # pragma: no cover - exercised implicitly when FastAPI is abs
     router = None
 else:
     router = APIRouter()
-
