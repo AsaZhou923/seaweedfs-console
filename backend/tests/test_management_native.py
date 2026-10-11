@@ -1559,3 +1559,101 @@ def test_s3_tables_native_crud_requires_flags_and_precise_readback(api):
         ("table.untag_resource", "confirmed"),
         ("table.delete_table", "confirmed"),
     ]
+
+
+@pytest.mark.parametrize('target', [
+    {'name': 'events', 'row_count': 250},
+    {'name': 'other', 'description': 'events', 'row_count': 0},
+    {'name': 'events', 'row_count': False},
+    {'name': 'events', 'row_count': 0.5},
+    {'name': 'events', 'row_count': 'empty'},
+    {'name': 'events', 'row_count': 0, 'records': 250},
+    {'name': 'events'},
+])
+def test_table_delete_requires_exact_target_and_proven_empty_count(api, target):
+    client, settings, csrf, native = api
+    native.s3tables_available = True
+    connection = create_connection(client, settings, csrf, write=True)
+    arn = 'arn:seaweed:s3tables:::bucket/review'
+    native.tables[(arn, 'analytics', 'events_archive')] = {'name': 'events_archive', 'row_count': 0}
+    native.tables[(arn, 'analytics', target['name'])] = target
+    response = client.request('DELETE', f"/api/v1/management/{connection['id']}/modules/s3-tables/tables",
+        headers=headers(csrf), json={'bucket_arn': arn, 'namespace': 'analytics', 'name': 'events',
+                                    'confirm_empty': True, 'idempotency_key': 'exact-target'})
+    assert response.status_code == 409, response.text
+    assert response.json()['error']['code'] == 'MANAGEMENT_TABLE_DELETE_REQUIRES_EMPTY_CONFIRMATION'
+    assert not any(r.method == 'DELETE' and r.url.path == '/api/s3tables/tables' for r in native.requests)
+    assert native.tables[(arn, 'analytics', target['name'])] == target
+
+
+def test_table_delete_checks_latest_exact_target_and_replays_receipt(api, monkeypatch):
+    client, settings, csrf, native = api
+    native.s3tables_available = True
+    connection = create_connection(client, settings, csrf, write=True)
+    arn = 'arn:seaweed:s3tables:::bucket/review'
+    key = (arn, 'analytics', 'events')
+    native.tables[key] = {'name': 'events', 'row_count': 0}
+    endpoint = f"/api/v1/management/{connection['id']}/modules/s3-tables/tables"
+    body = {'bucket_arn': arn, 'namespace': 'analytics', 'name': 'events', 'confirm_empty': True, 'idempotency_key': 'replay'}
+    first = client.request('DELETE', endpoint, headers=headers(csrf), json=body)
+    assert first.status_code == 200, first.text
+    assert first.json()['status'] == 'confirmed'
+    before = len(native.requests)
+    replay = client.request('DELETE', endpoint, headers=headers(csrf), json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()['operation_id'] == first.json()['operation_id']
+    assert replay.json()['replayed'] is True
+    assert len(native.requests) == before
+
+    native.tables[key] = {'name': 'events', 'row_count': 0}
+    original = management_native._admin_request_json
+    reads = 0
+    def changing(*args, **kwargs):
+        nonlocal reads
+        if args[2:4] == ('GET', '/api/s3tables/tables'):
+            reads += 1
+            if reads == 2:
+                native.tables[key]['row_count'] = 250
+        return original(*args, **kwargs)
+    monkeypatch.setattr(management_native, '_admin_request_json', changing)
+    body['idempotency_key'] = 'changed-target'
+    before_deletes = sum(r.method == 'DELETE' for r in native.requests)
+    changed = client.request('DELETE', endpoint, headers=headers(csrf), json=body)
+    assert changed.status_code == 409, changed.text
+    assert native.tables[key]['row_count'] == 250
+    assert sum(r.method == 'DELETE' for r in native.requests) == before_deletes
+
+
+def test_table_lookup_rejects_ambiguous_duplicate_names():
+    assert management_native._s3_tables_table({'tables': [
+        {'name': 'events', 'row_count': 0}, {'name': 'events', 'row_count': 250},
+    ]}, 'events') is None
+
+
+@pytest.mark.parametrize('readback', [
+    {'tables': [{'name': 'events', 'row_count': 0}, {'name': 'events', 'row_count': 250}]},
+    {}, {'tables': None}, {'tables': [{'description': 'missing identity'}]},
+])
+def test_table_delete_does_not_confirm_ambiguous_or_unknown_inventory(api, monkeypatch, readback):
+    client, settings, csrf, native = api
+    native.s3tables_available = True
+    connection = create_connection(client, settings, csrf, write=True)
+    arn = 'arn:seaweed:s3tables:::bucket/review'
+    native.tables[(arn, 'analytics', 'events')] = {'name': 'events', 'row_count': 0}
+    original = management_native._admin_request_json
+    deleted = False
+    def uncertain(*args, **kwargs):
+        nonlocal deleted
+        if args[2:4] == ('GET', '/api/s3tables/tables') and deleted:
+            return readback
+        result = original(*args, **kwargs)
+        if args[2:4] == ('DELETE', '/api/s3tables/tables'):
+            deleted = True
+        return result
+    monkeypatch.setattr(management_native, '_admin_request_json', uncertain)
+    response = client.request('DELETE', f"/api/v1/management/{connection['id']}/modules/s3-tables/tables",
+        headers=headers(csrf), json={'bucket_arn': arn, 'namespace': 'analytics', 'name': 'events',
+                                    'confirm_empty': True, 'idempotency_key': 'uncertain-inventory'})
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'needs_review'
+    assert response.json()['result']['confirmed'] is False
