@@ -905,6 +905,8 @@ async def multipart_part(request: Request, scope_id: str, upload_id: str, part_n
         raise AppError("INVALID_PART_SIZE", "part 大小必须在 1B 到 64MiB 之间。", 422)
     with db.connect(request.app.state.settings) as conn:
         upload = _upload_for_scope(conn, scope, upload_id)
+        if upload["status"] != "active" or not upload["upload_id"]:
+            raise AppError("UPLOAD_NOT_ACTIVE", "Multipart upload is not active.", 409)
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         return adapter.upload_part(scope["bucket"], upload["key"], upload["upload_id"], part_number, data)
 

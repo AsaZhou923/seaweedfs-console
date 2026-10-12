@@ -122,6 +122,7 @@ async function main() {
       assert.equal(i18n.translateMessage('UPSTREAM_NEW_CODE: Language'), 'UPSTREAM_NEW_CODE: Language');
       assert.ok(invalidLogin.startsWith('UNAUTHENTICATED: '));
       assert.equal(invalidLogin, locale === 'en' ? 'UNAUTHENTICATED: Invalid username or password.' : 'UNAUTHENTICATED: ' + i18n.t('Invalid username or password.'));
+      assert.equal(i18n.translateMessage("INVALID_REQUEST: Multipart upload is not active."), locale === 'en' ? "INVALID_REQUEST: Multipart upload is not active." : "INVALID_REQUEST: 分段上传当前不是活动状态。");
       for (const [name, Component, props] of cases) {
         assert.equal(typeof Component, 'function', `Missing test component ${name}`);
         const html = renderToStaticMarkup(React.createElement(Component, props));
