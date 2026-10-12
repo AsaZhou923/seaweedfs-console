@@ -84,6 +84,12 @@ class FakeAdapter:
             version_id = self.current[(bucket, key)]
         return self.objects[(bucket, key, version_id)]["body"]
 
+
+    def get_object_bytes_if_match(self, bucket, key, version_id, etag):
+        if self.head_object(bucket, key, version_id).get("etag") != etag:
+            raise enh.ConflictError("source precondition failed")
+        return self.get_object_bytes(bucket, key, version_id)
+
     def put_object(self, bucket, key, data, metadata, content_type):
         if (bucket, key) in self.current:
             raise enh.ConflictError("target exists")
@@ -711,3 +717,23 @@ def test_multipart_abort_can_retry_after_transient_remote_failure(conn):
     assert adapter.abort_calls == 2
     assert upload["upload_id"] not in adapter.multipart
     assert enh.get_multipart_upload(conn, upload["id"])["status"] == "aborted"
+
+
+def test_safe_copy_fails_closed_without_conditional_read_support(conn):
+    adapter = FakeAdapter()
+    adapter.get_object_bytes_if_match = None
+    with pytest.raises(enh.CapabilityUnsupported, match='conditional source-read'):
+        enh.copy_object_safely(conn, adapter, scope_id='s', source_bucket='b', source_key='source',
+                              source_version_id='v1', target_bucket='b', target_key='new')
+    assert ('b', 'new') not in adapter.current
+    assert conn.execute('SELECT count(*) FROM operation_intents').fetchone()[0] == 0
+
+
+
+def test_safe_copy_fails_closed_without_source_etag(conn):
+    adapter = FakeAdapter()
+    adapter.objects[('b', 'source', 'v1')]['etag'] = None
+    with pytest.raises(enh.CapabilityUnsupported, match='ETag'):
+        enh.copy_object_safely(conn, adapter, scope_id='s', source_bucket='b', source_key='source',
+                              source_version_id='v1', target_bucket='b', target_key='new')
+    assert ('b', 'new') not in adapter.current
