@@ -1,0 +1,9 @@
+# Bind object versions and detail evidence to their current object
+
+Opening object A then B while A requests remained pending could put A's evidence and versions into B's drawer. Editing Operations object ID while versions were loading could similarly combine B with A's version for restore, retention or legal hold. Detail now remounts on Scope/object/asset identity and rejects obsolete fetch completions. Operations invalidates versions and selected version IDs on object changes, and guards request results with object identity and request generation.
+
+Run `npm run build --prefix frontend`, `npm run test:i18n --prefix frontend`, then `node scripts/verify_object_identity_regressions.cjs`. The runner accepts SWC_PLAYWRIGHT_MODULE (default /opt/codex/runtimes/cua/lib/node_modules/playwright-core), SWC_CHROME_PATH (default /usr/bin/chromium), and SWC_REGRESSION_DIST (default frontend/dist). Install Playwright outside application dependencies when overriding the module path. Chromium runs with chromiumSandbox:true; a working browser sandbox is required.
+
+Four real Chromium/synthetic HTTP scenarios passed on this branch: delayed/reversed Detail responses; B-bound download/restore; reversed Operations version responses across restore/retention/legal-hold; and clearing version selection plus disabling version mutations on object changes. Build and bilingual/SSR checks passed with 1,432 messages and 50 views. These tests perform no real SeaweedFS writes.
+
+This branch is independently based on d721727. The separate Operations handoff fix moves the sourceObjectIds effect; if merging both creates a textual conflict, preserve that fix's post-reset placement and sameScope guard, and use changeObjectId(sourceObjectIds[0]) from this fix inside the moved effect. No behavioral dependency on that branch is required for these regressions.

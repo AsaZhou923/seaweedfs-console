@@ -101,3 +101,22 @@ jobs:
       - name: Run mocked browser regressions
         timeout-minutes: 5
         run: node scripts/verify_frontend_review_regressions.cjs
+      - name: Install isolated browser regression dependency
+        if: runner.os == 'Linux'
+        shell: bash
+        run: npm install --prefix "$RUNNER_TEMP/swc-browser-regressions" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund playwright-core@1.57.0
+      - name: Run combined frontend regressions
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          export PLAYWRIGHT_MODULE="$RUNNER_TEMP/swc-browser-regressions/node_modules/playwright-core"
+          export SWC_PLAYWRIGHT_MODULE="$PLAYWRIGHT_MODULE"
+          export CHROMIUM_PATH="$CHROME_PATH"
+          export SWC_CHROME_PATH="$CHROME_PATH"
+          node scripts/verify_multipart_readonly_ui.cjs
+          node scripts/verify_operations_selection_handoff.cjs
+          node scripts/verify_object_identity_regressions.cjs
+          SWC_VERIFY_OPERATIONS_HANDOFF=1 node scripts/verify_management_context_regressions.cjs
+          node scripts/verify_maintenance_target_regressions.cjs
+          node scripts/verify_iam_inventory_regressions.cjs

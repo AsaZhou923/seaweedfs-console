@@ -689,7 +689,7 @@ function Assets({ request, scopeId, projectId, onSelectionChange, sendToOperatio
           <ReportBox title={t("重复/容量")} data={{ duplicates, capacity }} />
         </aside>
       </div>
-      {detail && detail.scope_id === scopeId && <Detail request={request} asset={detail} scopeId={scopeId} close={() => setDetail(null)} />}
+      {detail && detail.scope_id === scopeId && <Detail key={JSON.stringify([scopeId, detail.id, detail.asset_id])} request={request} asset={detail} scopeId={scopeId} close={() => setDetail(null)} />}
     </section>
   );
 }
@@ -723,12 +723,16 @@ function Detail({ request, asset, scopeId, close }: { request: Requester; asset:
   const [message, setMessage] = useState("");
 
   useEffect(() => {
+    let active = true;
+    setAssetInfo(null);
+    setVersions([]);
     setTags(((asset as any).tags || []).join(", "));
     setMessage("");
-    request(`/scopes/${scopeId}/assets/${asset.asset_id}`).then(setAssetInfo).catch((err) => setAssetInfo({ error: String((err as Error).message) }));
+    request(`/scopes/${scopeId}/assets/${asset.asset_id}`).then((value) => { if (active) setAssetInfo(value); }).catch((err) => { if (active) setAssetInfo({ error: String((err as Error).message) }); });
     request<{ items?: unknown[]; versions?: unknown[] }>(`/scopes/${scopeId}/objects/${encodeURIComponent(asset.id)}/versions`)
-      .then((value) => setVersions((value.versions || value.items || []).filter(isRecord)))
-      .catch((err) => setVersions([{ error: String((err as Error).message) }]));
+      .then((value) => { if (active) setVersions((value.versions || value.items || []).filter(isRecord)); })
+      .catch((err) => { if (active) setVersions([{ error: String((err as Error).message) }]); });
+    return () => { active = false; };
   }, [asset.id, asset.asset_id, scopeId]);
 
   async function saveTags() {
@@ -960,20 +964,43 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
   const [trash, setTrash] = useState({ variant_id: "", reason: "manual review" });
   const token = useRef(0);
   const selectionScope = useRef(scopeId);
+  const objectIdentity = JSON.stringify([scopeId, objectOps.object_id]);
+  const currentObjectIdentity = useRef(objectIdentity);
+  currentObjectIdentity.current = objectIdentity;
+  const versionsToken = useRef(0);
+
+  function changeObjectId(objectId: string) {
+    versionsToken.current += 1;
+    token.current += 1;
+    setObjectVersions([]);
+    setResult(null);
+    setError("");
+    setObjectOps((old) => ({ ...old, object_id: objectId, version_id: "" }));
+  }
+
+  useEffect(() => {
+    versionsToken.current += 1;
+    setObjectVersions([]);
+    setResult(null);
+    setError("");
+    setObjectOps((old) => ({ ...old, version_id: "" }));
+  }, [objectIdentity]);
   const scopeWritable = Boolean(scope?.writable);
   const scopeCanManageBucket = Boolean(scope?.manage_bucket);
 
   async function run(label: string, fn: () => Promise<unknown>, apply?: (value: any) => void) {
     const requestScopeId = scopeId;
     const current = token.current;
+    const requestObjectIdentity = objectIdentity;
+    const isCurrent = () => token.current === current && requestScopeId === scopeId && (tab !== "object" || currentObjectIdentity.current === requestObjectIdentity);
     setError("");
     try {
       const value = await fn();
-      if (token.current !== current || requestScopeId !== scopeId) return;
+      if (!isCurrent()) return;
       apply?.(value);
       setResult({ label, value });
     } catch (err) {
-      if (token.current === current && requestScopeId === scopeId) setError(String((err as Error).message));
+      if (isCurrent()) setError(String((err as Error).message));
     }
   }
 
@@ -1013,8 +1040,10 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
   async function loadObjectVersions() {
     const requestScopeId = scopeId;
     const current = token.current;
+    const identity = objectIdentity;
+    const versionRequest = ++versionsToken.current;
     const value = await request(`/scopes/${requestScopeId}/objects/${encodeURIComponent(objectOps.object_id)}/versions`);
-    if (token.current === current && requestScopeId === scopeId) setObjectVersions(objectVersionRows(value));
+    if (token.current === current && currentObjectIdentity.current === identity && versionsToken.current === versionRequest) setObjectVersions(objectVersionRows(value));
     return value;
   }
 
@@ -1040,7 +1069,7 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
     if (sameScope && sourceObjectIds.length) {
       setCopyBatch((old) => ({ ...old, object_ids: sourceObjectIds.join("\n"), target_scope_id: old.target_scope_id || scopeId }));
       setCopy((old) => ({ ...old, object_id: sourceObjectIds[0] }));
-      setObjectOps((old) => ({ ...old, object_id: sourceObjectIds[0] }));
+      changeObjectId(sourceObjectIds[0]);
       setObjectVersions([]);
     }
   }, [sourceObjectIds, scopeId]);
@@ -1111,7 +1140,7 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
       </div><ResultPane error={error} result={result} /></div>}
       {tab === "object" && <div className="two"><div>
         <h2>{t("对象版本、标签、保留策略")}</h2>
-        <label className="field">{t("对象 ID")}<input value={objectOps.object_id} onChange={(event) => setObjectOps({ ...objectOps, object_id: event.target.value })} /></label>
+        <label className="field">{t("对象 ID")}<input value={objectOps.object_id} onChange={(event) => changeObjectId(event.target.value)} /></label>
         <label className="field">{t("Version ID")}<input value={objectOps.version_id} onChange={(event) => setObjectOps({ ...objectOps, version_id: event.target.value })} placeholder={t("可留空读取当前版本")} /></label>
         <label className="field">{t("恢复目标 Key")}<input value={objectOps.target_key} onChange={(event) => setObjectOps({ ...objectOps, target_key: event.target.value })} /></label>
         <ObjectVersionTable versions={objectVersions} selectVersion={(versionId) => setObjectOps((old) => ({ ...old, version_id: versionId }))} />
