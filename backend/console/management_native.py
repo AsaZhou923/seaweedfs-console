@@ -742,10 +742,21 @@ def _s3_tables_namespace_exists(data: Any, namespace: str) -> bool:
 
 
 def _s3_tables_table(data: Any, name: str) -> Any | None:
-    for item in _list_field(data, "tables", "items"):
-        if name in json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False):
-            return item
-    return None
+    # The listing is scoped to the requested bucket and namespace. Descriptions,
+    # ARNs and similarly named tables are not evidence for the selected name.
+    matches = [item for item in _list_field(data, "tables", "items")
+               if isinstance(item, dict) and item.get("name") == name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _s3_tables_table_absent(data: Any, name: str) -> bool:
+    rows = data if isinstance(data, list) else None
+    if isinstance(data, dict):
+        rows = data.get("tables", data.get("items"))
+    # Unknown/malformed inventories and duplicate target rows do not prove deletion.
+    return (isinstance(rows, list)
+            and all(isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"] for item in rows)
+            and not any(item["name"] == name for item in rows))
 
 
 def _s3_table_empty(table: Any) -> bool:
@@ -753,15 +764,15 @@ def _s3_table_empty(table: Any) -> bool:
         return False
     if not isinstance(table, dict):
         return False
+    observed = False
     for key in ("row_count", "rows", "observed_row_count", "record_count", "records"):
         value = table.get(key)
         if value is None or value == "":
             continue
-        try:
-            return int(value) == 0
-        except (TypeError, ValueError):
-            return str(value).lower() in {"0", "zero", "empty"}
-    return False
+        observed = True
+        if not ((type(value) is int and value == 0) or (isinstance(value, str) and value.strip() == "0")):
+            return False
+    return observed
 
 
 def _policy_matches(data: Any, policy: str) -> bool:
@@ -1792,14 +1803,20 @@ def s3_table_delete_table(request: Request, management_id: str, body: dict[str, 
     namespace = _required_text(body, "namespace")
     name = _segment(_required_text(body, "name"), "name")
     version = str(body.get("version") or "")
-    before = _admin_request_json(settings, mgmt, "GET", "/api/s3tables/tables", params={"bucket": bucket_arn, "namespace": namespace})
-    table = _s3_tables_table(before, name)
-    if body.get("confirm_empty") is not True or not _s3_table_empty(table):
+    if body.get("confirm_empty") is not True:
         raise AppError("MANAGEMENT_TABLE_DELETE_REQUIRES_EMPTY_CONFIRMATION", "table delete requires confirm_empty=true and an empty observed table.", 409)
     params = {"bucket": bucket_arn, "namespace": namespace, "name": name}
     if version:
         params["version"] = version
     payload = {"bucket_arn": bucket_arn, "namespace": namespace, "name": name, "version": version}
+
+    def invoke() -> Any:
+        # Check the exact target immediately before dispatch, after receipt replay.
+        listing = _admin_request_json(settings, mgmt, "GET", "/api/s3tables/tables", params={"bucket": bucket_arn, "namespace": namespace})
+        if not _s3_table_empty(_s3_tables_table(listing, name)):
+            raise AppError("MANAGEMENT_TABLE_DELETE_REQUIRES_EMPTY_CONFIRMATION", "table delete requires confirm_empty=true and an empty observed table.", 409)
+        return _admin_request_json(settings, mgmt, "DELETE", "/api/s3tables/tables", params=params)
+
     return _management_ops_module().perform_operation(
         settings,
         mgmt,
@@ -1810,9 +1827,9 @@ def s3_table_delete_table(request: Request, management_id: str, body: dict[str, 
         payload,
         params=params,
         idempotency_key=body.get("idempotency_key"),
-        invoke=lambda: _admin_request_json(settings, mgmt, "DELETE", "/api/s3tables/tables", params=params),
+        invoke=invoke,
         readback=lambda: _admin_request_json(settings, mgmt, "GET", "/api/s3tables/tables", params={"bucket": bucket_arn, "namespace": namespace}),
-        verify=lambda _before, after, response: bool(response) and _s3_tables_table(after, name) is None,
+        verify=lambda _before, after, response: bool(response) and _s3_tables_table_absent(after, name),
     )
 
 
