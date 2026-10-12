@@ -909,6 +909,8 @@ async def multipart_part(request: Request, scope_id: str, upload_id: str, part_n
             raise AppError("FORBIDDEN_SCOPE", "Scope authorization changed while receiving the upload part.", 403)
         scope = current_scope
         upload = _upload_for_scope(conn, scope, upload_id)
+        if upload["status"] != "active" or not upload["upload_id"]:
+            raise AppError("UPLOAD_NOT_ACTIVE", "Multipart upload is not active.", 409)
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         return adapter.upload_part(scope["bucket"], upload["key"], upload["upload_id"], part_number, data)
 

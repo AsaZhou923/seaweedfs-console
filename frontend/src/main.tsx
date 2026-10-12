@@ -123,6 +123,13 @@ function App() {
   const pendingUnsafeRequests = useRef(new Set<string>());
 
   function selectProject(nextProjectId: string) {
+    if (projectIdRef.current !== nextProjectId) {
+      scopesRequestRef.current += 1;
+      selectScope("");
+      setScopes([]);
+      setDeriveObjectIds([]);
+      setSelectedObjectIds([]);
+    }
     projectIdRef.current = nextProjectId;
     setProjectId(nextProjectId);
   }
@@ -249,28 +256,27 @@ function App() {
     const list = await request<{ items: Connection[] }>("/connections");
     setConnections(list.items || []);
     await refreshManagementConnections();
-    if (chosenProject) await refreshScopes(chosenProject);
+    if (chosenProject && projectIdRef.current === chosenProject) await refreshScopes(chosenProject);
   }
 
   async function refreshScopes(nextProjectId = projectIdRef.current) {
-    if (!nextProjectId) return;
+    if (!nextProjectId || projectIdRef.current !== nextProjectId) return;
     const requestId = ++scopesRequestRef.current;
-    const previousProjectId = projectIdRef.current;
-    if (previousProjectId !== nextProjectId) {
-      projectIdRef.current = nextProjectId;
-      selectScope("");
-      setScopes([]);
+    try {
+      const result = await request<{ items: Scope[] }>(`/projects/${nextProjectId}/scopes`);
+      if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
+      const items = result.items || [];
+      setScopes(items);
+      setScopeId((current) => {
+        const latest = scopeIdRef.current || current;
+        const next = latest && items.some((scope) => scope.id === latest) ? latest : items[0]?.id || "";
+        scopeIdRef.current = next;
+        return next;
+      });
+    } catch (err) {
+      if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
+      throw err;
     }
-    const result = await request<{ items: Scope[] }>(`/projects/${nextProjectId}/scopes`);
-    if (scopesRequestRef.current !== requestId || projectIdRef.current !== nextProjectId) return;
-    const items = result.items || [];
-    setScopes(items);
-    setScopeId((current) => {
-      const latest = scopeIdRef.current || current;
-      const next = latest && items.some((scope) => scope.id === latest) ? latest : items[0]?.id || "";
-      scopeIdRef.current = next;
-      return next;
-    });
   }
 
   async function refreshManagementConnections() {
@@ -403,7 +409,7 @@ function App() {
           </div>}
         </header>
         {error && <div className="notice error">{translateMessage(error)}<button onClick={() => setError("")}>×</button></div>}
-        {managementRoute && (managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={(objectId) => { setSelectedObjectIds([objectId]); setOperationTab("object"); }} />)}
+        {managementRoute && (managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={selectScope} onObjectSelected={(objectId) => { setSelectedObjectIds(objectId ? [objectId] : []); if (objectId) setOperationTab("object"); }} />)}
         {route === "assets" && <Assets request={request} scopeId={scopeId} projectId={projectId} onSelectionChange={setSelectedObjectIds} sendToOperationsCopy={(ids) => { setSelectedObjectIds(ids); setOperationTab("copy"); location.hash = "operations"; }} sendToPresets={(ids) => { setDeriveObjectIds(ids); location.hash = "presets"; }} />}
         {route === "scans" && <Scans request={request} scopeId={scopeId} onChanged={() => refreshScopes(projectId)} />}
         {route === "diagnostics" && <Diagnostics request={request} scopeId={scopeId} />}
@@ -953,6 +959,7 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
   const [capacity, setCapacity] = useState({ thresholds: '{"source_bytes":10737418240}' });
   const [trash, setTrash] = useState({ variant_id: "", reason: "manual review" });
   const token = useRef(0);
+  const selectionScope = useRef(scopeId);
   const scopeWritable = Boolean(scope?.writable);
   const scopeCanManageBucket = Boolean(scope?.manage_bucket);
 
@@ -982,15 +989,6 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
     if (!file) throw new Error("请选择要上传的 part 文件。");
     return request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/parts?part_number=${encodeURIComponent(partNumber)}`, { method: "POST", body: file });
   }
-
-  useEffect(() => {
-    if (sourceObjectIds.length) {
-      setCopyBatch((old) => ({ ...old, object_ids: sourceObjectIds.join("\n"), target_scope_id: old.target_scope_id || scopeId }));
-      setCopy((old) => ({ ...old, object_id: sourceObjectIds[0] }));
-      setObjectOps((old) => ({ ...old, object_id: sourceObjectIds[0] }));
-      setObjectVersions([]);
-    }
-  }, [sourceObjectIds, scopeId]);
 
   const copyBatchItems = useMemo(() => {
     const objectIds = lines(copyBatch.object_ids);
@@ -1035,6 +1033,18 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
     setTrash((old) => ({ ...old, variant_id: "" }));
   }, [scopeId]);
 
+  useEffect(() => {
+    const sameScope = selectionScope.current === scopeId;
+    selectionScope.current = scopeId;
+    // Import an intentional handoff after initial reset, never across Scopes.
+    if (sameScope && sourceObjectIds.length) {
+      setCopyBatch((old) => ({ ...old, object_ids: sourceObjectIds.join("\n"), target_scope_id: old.target_scope_id || scopeId }));
+      setCopy((old) => ({ ...old, object_id: sourceObjectIds[0] }));
+      setObjectOps((old) => ({ ...old, object_id: sourceObjectIds[0] }));
+      setObjectVersions([]);
+    }
+  }, [sourceObjectIds, scopeId]);
+
   return (
     <section className="panel imageWorkbench">
       <div className="workbenchHeader">
@@ -1060,14 +1070,14 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
         <h2>{t("multipart 上传")}</h2>
         <label className="field">{t("目标 Key")}<input value={upload.key} onChange={(event) => setUpload({ ...upload, key: event.target.value })} placeholder="prefix/new-image.webp" /></label>
         <label className="field">{t("Metadata JSON")}<textarea value={upload.metadata} onChange={(event) => setUpload({ ...upload, metadata: event.target.value })} /></label>
-        <button disabled={!scopeId || !upload.key} onClick={() => run("multipart.init", initUpload)}>{t("初始化")}</button>
+        <button disabled={!scopeId || !scopeWritable || !upload.key} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.init", initUpload)}>{t("初始化")}</button>
         <label className="field">{t("Upload ID")}<input value={upload.uploadId} onChange={(event) => setUpload({ ...upload, uploadId: event.target.value })} /></label>
         <label className="field">{t("Part Number")}<input type="number" min="1" value={partNumber} onChange={(event) => setPartNumber(event.target.value)} /></label>
         <label className="field">{t("Part 文件")}<input type="file" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
         <div className="toolbar">
-          <button disabled={!scopeId || !upload.uploadId || !file} onClick={() => run("multipart.part", uploadPart)}>{t("上传 part")}</button>
-          <button disabled={!scopeId || !upload.uploadId} onClick={() => run("multipart.complete", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/complete`, { method: "POST", body: JSON.stringify({ parts: parseJsonArray(upload.parts, "parts") }) }))}>{t("Complete")}</button>
-          <button disabled={!scopeId || !upload.uploadId} onClick={() => run("multipart.abort", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/abort`, { method: "POST", body: "{}" }))}>{t("Abort")}</button>
+          <button disabled={!scopeId || !scopeWritable || !upload.uploadId || !file} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.part", uploadPart)}>{t("上传 part")}</button>
+          <button disabled={!scopeId || !scopeWritable || !upload.uploadId} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.complete", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/complete`, { method: "POST", body: JSON.stringify({ parts: parseJsonArray(upload.parts, "parts") }) }))}>{t("Complete")}</button>
+          <button disabled={!scopeId || !scopeWritable || !upload.uploadId} title={scopeWritable ? "" : t("当前 Scope 未开启 writable")} onClick={() => run("multipart.abort", () => request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/abort`, { method: "POST", body: "{}" }))}>{t("Abort")}</button>
         </div>
         <label className="field">{t("Complete parts JSON")}<textarea value={upload.parts} onChange={(event) => setUpload({ ...upload, parts: event.target.value })} placeholder='[{"PartNumber":1,"ETag":"..."}]' /></label>
       </div><ResultPane error={error} result={result} /></div>}
