@@ -211,7 +211,7 @@ def update_management_access_policy(request: Request, management_id: str, body: 
         write_enabled = _strict_bool(body["management_write_enabled"], "management_write_enabled")
         if write_enabled and body.get("acknowledge_management_write") is not True:
             raise AppError("MANAGEMENT_WRITE_ACK_REQUIRED", "Enabling management writes requires acknowledge_management_write=true.", 422, field="acknowledge_management_write")
-        permissions = _validate_permissions(body.get("permissions") or before["permissions"])
+        permissions = _validate_permissions(body["permissions"] if "permissions" in body else before["permissions"])
         reason = body.get("reason")
         if reason is not None and not isinstance(reason, str):
             raise AppError("INVALID_REQUEST", "reason must be a string.", 422, field="reason")
