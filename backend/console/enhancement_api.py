@@ -342,6 +342,8 @@ def _assert_head_matches_indexed_object(scope: Mapping[str, Any], obj: Mapping[s
 
 def _validate_manifest_entries(conn, scope: Mapping[str, Any], entries: list[Mapping[str, Any]]) -> None:
     for entry in entries:
+        if entry.get("connection_id") and entry["connection_id"] != scope["connection_id"]:
+            raise AppError("MANIFEST_SCOPE_MISMATCH", "Manifest entry connection does not belong to this Scope.", 422)
         if entry.get("bucket") and entry["bucket"] != scope["bucket"]:
             raise AppError("MANIFEST_SCOPE_MISMATCH", "manifest entry bucket 不属于当前 scope。", 422)
         if entry.get("key"):
@@ -567,11 +569,21 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
         enhancements.initialize(conn)
         if output_scope["project_id"] != scope["project_id"]:
             raise AppError("FORBIDDEN_SCOPE", "派生输出 scope 必须属于同一项目。", 403)
-        preset_row = conn.execute("SELECT project_id FROM enhancement_presets WHERE id=?", (body["preset_id"],)).fetchone()
+        preset_row = conn.execute("SELECT project_id,params_json FROM enhancement_presets WHERE id=?", (body["preset_id"],)).fetchone()
         if not preset_row or preset_row["project_id"] != scope["project_id"]:
             raise AppError("PRESET_NOT_FOUND", "preset 不存在或不属于当前项目。", 404)
-        if body.get("output_key"):
-            core.assert_key_in_scope(output_scope, body["output_key"])
+        output_key = body.get("output_key")
+        if output_key is None:
+            seed = enhancements.canonical_json({
+                "scope_id": scope_id,
+                "source_object_id": object_id,
+                "source_revision": source["revision"],
+                "preset_id": body["preset_id"],
+                "output_scope_id": output_scope_id,
+            })
+            output_format = json.loads(preset_row["params_json"])["format"]
+            output_key = f"{output_scope['prefix']}derived/{enhancements.sha256_text(seed)[:32]}.{output_format}"
+        core.assert_key_in_scope(output_scope, output_key)
         try:
             variant = enhancements.create_derived_variant_intent(
                 conn,
@@ -582,7 +594,7 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
                 preset_id=body["preset_id"],
                 output_scope_id=output_scope_id,
                 output_bucket=output_scope["bucket"],
-                output_key=body.get("output_key"),
+                output_key=output_key,
                 actor_id=user.id,
             )
             job = jobs.submit_job(
@@ -904,7 +916,13 @@ async def multipart_part(request: Request, scope_id: str, upload_id: str, part_n
     if not data:
         raise AppError("INVALID_PART_SIZE", "part 大小必须在 1B 到 64MiB 之间。", 422)
     with db.connect(request.app.state.settings) as conn:
+        current_scope = core.ensure_scope_permission(conn, scope_id, "object:write")
+        if any(current_scope[field] != scope[field] for field in ("authz_epoch", "connection_id", "bucket", "prefix")):
+            raise AppError("FORBIDDEN_SCOPE", "Scope authorization changed while receiving the upload part.", 403)
+        scope = current_scope
         upload = _upload_for_scope(conn, scope, upload_id)
+        if upload["status"] != "active" or not upload["upload_id"]:
+            raise AppError("UPLOAD_NOT_ACTIVE", "Multipart upload is not active.", 409)
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         return adapter.upload_part(scope["bucket"], upload["key"], upload["upload_id"], part_number, data)
 
@@ -1385,6 +1403,7 @@ def execute_variant_job(job: dict[str, Any], settings: Any) -> None:
         source = core.get_object(conn, variant["scope_id"], variant["source_object_id"])
         source_scope = core.ensure_scope_permission(conn, variant["scope_id"], "object:read")
         output_scope = core.ensure_scope_permission(conn, variant["output_scope_id"], "object:write")
+        core.assert_key_in_scope(output_scope, variant["output_key"])
         if source_scope["project_id"] != output_scope["project_id"] or source_scope["project_id"] != variant["project_id"]:
             raise AppError("FORBIDDEN_SCOPE", "派生输入和输出必须属于同一项目。", 403)
         preset_row = conn.execute("SELECT params_json FROM enhancement_presets WHERE id=? AND project_id=?", (variant["preset_id"], variant["project_id"])).fetchone()
