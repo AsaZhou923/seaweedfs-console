@@ -408,3 +408,21 @@ def test_scope_creation_rejects_malformed_privileges_and_prefix(api, change):
     assert response.status_code == 422
     with db.connect(app.state.settings) as conn:
         assert conn.execute('SELECT count(*) FROM scopes').fetchone()[0] == 1
+
+
+def test_scope_jobs_are_filtered_before_limit(api):
+    client, app, _ = api
+    csrf = login(client)
+    _, _, scope_a = create_scope(client, csrf, 'gallery/')
+    _, _, scope_b = create_scope(client, csrf, 'other/')
+    with db.connect(app.state.settings) as conn:
+        wanted = jobs.submit_job(conn, scope_a, 'scan', {'authz_epoch': 1})
+        conn.execute("UPDATE jobs SET created_at='2026-01-01T00:00:00Z' WHERE id=?", (wanted['id'],))
+        for _ in range(201):
+            jobs.submit_job(conn, scope_b, 'checksum', {'authz_epoch': 1})
+        # The previous global-limit-then-filter query loses this older Scope job.
+        prior_rows = conn.execute('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 200').fetchall()
+        assert not [row for row in prior_rows if row['scope_id'] == scope_a]
+    response = client.get('/api/v1/jobs', params={'scope_id': scope_a})
+    assert response.status_code == 200
+    assert [item['id'] for item in response.json()['items']] == [wanted['id']]
