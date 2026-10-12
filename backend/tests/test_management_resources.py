@@ -1251,6 +1251,29 @@ def test_http_admin_iam_ignored_write_and_scope_revocation_are_not_confirmed(tmp
     assert [(row["path"], row["state"]) for row in rows] == [("/api/groups/team/status", "needs_review")]
 
 
+@pytest.mark.parametrize('username', [42, True, ['name'], {'name': 'x'}, None, ''])
+def test_user_creation_rejects_non_string_or_empty_username_before_remote_calls(api, username):
+    client, admin, s3, operations = api
+    response = client.post('/api/v1/management/mgmt_1/iam/users', json={'username': username})
+    assert response.status_code == 422
+    assert response.json()['error']['code'] == 'INVALID_USERNAME'
+    assert admin.calls == [] and s3.calls == [] and operations == []
+
+
+@pytest.mark.parametrize(('path', 'code'), [
+    ('buckets/photos/versioning', 'INVALID_VERSIONING_STATUS'),
+    ('iam/users/alice/access-keys/AKIA/status', 'INVALID_ACCESS_KEY_STATUS'),
+    ('iam/groups/team/status', 'INVALID_GROUP_STATUS'),
+])
+@pytest.mark.parametrize('status', [[], {}, True, 1, None])
+def test_resource_status_rejects_non_strings_before_remote_calls(api, path, code, status):
+    client, admin, s3, operations = api
+    response = client.put('/api/v1/management/mgmt_1/' + path, json={'status': status})
+    assert response.status_code == 422
+    assert response.json()['error']['code'] == code
+    assert admin.calls == [] and s3.calls == [] and operations == []
+
+
 def test_bucket_delete_replays_persisted_receipt_without_rechecking_missing_bucket(tmp_path, monkeypatch):
     admin = HttpIamAdmin()
     settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
