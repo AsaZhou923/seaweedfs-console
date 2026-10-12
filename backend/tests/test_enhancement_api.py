@@ -788,3 +788,48 @@ def test_manifest_connection_identity_must_match_authoritative_scope(settings):
         with pytest.raises(enhancements.ValidationError):
             enhancements.import_reference_manifest_entries(conn, manifest_id=manifest['id'], entries=[entry])
         assert conn.execute('SELECT count(*) FROM reference_manifest_entries').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("prefix", ["allowed/", "literal", "raw//../"])
+def test_default_derived_output_stays_within_literal_scope(settings, monkeypatch, prefix):
+    variant, _ = setup_variant(settings)
+    with db.connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO scopes(id,project_id,connection_id,display_name,bucket,prefix,writable,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("out", "p", "con", "output", "bucket", prefix, 1, jobs.now(), jobs.now()),
+        )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), headers={"Idempotency-Key": "derived-default"})
+    monkeypatch.setattr(enhancement_api, "mutation", lambda request: SimpleNamespace(id="admin"))
+
+    def require_scope(request, scope_id, **kwargs):
+        with db.connect(settings) as conn:
+            return core.ensure_scope_permission(conn, scope_id, "object:read")
+
+    monkeypatch.setattr(enhancement_api, "_require_scope", require_scope)
+    body = {"object_id": "o", "preset_id": variant["preset_id"], "output_scope_id": "out"}
+    created = enhancement_api.submit_derived_variant(request, "s", body)
+    replay = enhancement_api.submit_derived_variant(request, "s", body)
+    assert created["variant"]["output_key"].startswith(prefix + "derived/")
+    assert replay["job"]["id"] == created["job"]["id"]
+    with db.connect(settings) as conn:
+        claimed = jobs.claim(conn)
+    fake = FakeS3()
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda *args: enhancement_api.S3EnhancementAdapter(fake))
+    enhancement_api.execute_variant_job(claimed, settings)
+    assert fake.puts == 1
+    assert ("bucket", created["variant"]["output_key"]) in fake.objects
+
+
+
+def test_derived_worker_rechecks_changed_output_scope_prefix_before_storage(settings, monkeypatch):
+    variant, claimed = setup_variant(settings)
+    with db.connect(settings) as conn:
+        conn.execute("UPDATE scopes SET prefix='in' WHERE id='s'")
+    storage_calls = []
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda *args: storage_calls.append(args))
+    with pytest.raises(AppError) as error:
+        enhancement_api.execute_variant_job(claimed, settings)
+    assert error.value.code == "FORBIDDEN_SCOPE"
+    assert storage_calls == []
+    with db.connect(settings) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM operation_intents WHERE operation_type='derived.put'").fetchone()[0] == 0

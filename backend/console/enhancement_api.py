@@ -569,11 +569,21 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
         enhancements.initialize(conn)
         if output_scope["project_id"] != scope["project_id"]:
             raise AppError("FORBIDDEN_SCOPE", "派生输出 scope 必须属于同一项目。", 403)
-        preset_row = conn.execute("SELECT project_id FROM enhancement_presets WHERE id=?", (body["preset_id"],)).fetchone()
+        preset_row = conn.execute("SELECT project_id,params_json FROM enhancement_presets WHERE id=?", (body["preset_id"],)).fetchone()
         if not preset_row or preset_row["project_id"] != scope["project_id"]:
             raise AppError("PRESET_NOT_FOUND", "preset 不存在或不属于当前项目。", 404)
-        if body.get("output_key"):
-            core.assert_key_in_scope(output_scope, body["output_key"])
+        output_key = body.get("output_key")
+        if output_key is None:
+            seed = enhancements.canonical_json({
+                "scope_id": scope_id,
+                "source_object_id": object_id,
+                "source_revision": source["revision"],
+                "preset_id": body["preset_id"],
+                "output_scope_id": output_scope_id,
+            })
+            output_format = json.loads(preset_row["params_json"])["format"]
+            output_key = f"{output_scope['prefix']}derived/{enhancements.sha256_text(seed)[:32]}.{output_format}"
+        core.assert_key_in_scope(output_scope, output_key)
         try:
             variant = enhancements.create_derived_variant_intent(
                 conn,
@@ -584,7 +594,7 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
                 preset_id=body["preset_id"],
                 output_scope_id=output_scope_id,
                 output_bucket=output_scope["bucket"],
-                output_key=body.get("output_key"),
+                output_key=output_key,
                 actor_id=user.id,
             )
             job = jobs.submit_job(
@@ -1392,6 +1402,7 @@ def execute_variant_job(job: dict[str, Any], settings: Any) -> None:
         source = core.get_object(conn, variant["scope_id"], variant["source_object_id"])
         source_scope = core.ensure_scope_permission(conn, variant["scope_id"], "object:read")
         output_scope = core.ensure_scope_permission(conn, variant["output_scope_id"], "object:write")
+        core.assert_key_in_scope(output_scope, variant["output_key"])
         if source_scope["project_id"] != output_scope["project_id"] or source_scope["project_id"] != variant["project_id"]:
             raise AppError("FORBIDDEN_SCOPE", "派生输入和输出必须属于同一项目。", 403)
         preset_row = conn.execute("SELECT params_json FROM enhancement_presets WHERE id=? AND project_id=?", (variant["preset_id"], variant["project_id"])).fetchone()
