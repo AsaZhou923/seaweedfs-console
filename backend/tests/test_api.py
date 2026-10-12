@@ -391,3 +391,20 @@ def test_login_rejects_malformed_credentials_without_session(api, username, pass
     assert response.json()['error']['code'] == 'UNAUTHENTICATED'
     with db.connect(app.state.settings) as conn:
         assert conn.execute('SELECT count(*) FROM sessions').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('change', [
+    {'writable': 'false'}, {'writable': 1}, {'manage_bucket': 'false'}, {'manage_bucket': None},
+    {'overlap_ack': 'false'}, {'scope_policy': None}, {'scope_policy': []},
+    {'scope_policy': {'allow_preview': 'false'}}, {'scope_policy': {'allow_original_download': 1}},
+    {'prefix': None}, {'prefix': []}, {'prefix': 123},
+])
+def test_scope_creation_rejects_malformed_privileges_and_prefix(api, change):
+    client, app, _ = api
+    csrf = login(client)
+    connection, project, scope = create_scope(client, csrf)
+    body = {'connection_id': connection, 'display_name': 'malformed scope', 'bucket': 'images', 'prefix': 'separate/', **change}
+    response = client.post(f'/api/v1/projects/{project}/scopes', json=body, headers=authed_headers(csrf))
+    assert response.status_code == 422
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute('SELECT count(*) FROM scopes').fetchone()[0] == 1
