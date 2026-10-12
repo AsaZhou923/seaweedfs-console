@@ -1251,6 +1251,174 @@ def test_http_admin_iam_ignored_write_and_scope_revocation_are_not_confirmed(tmp
     assert [(row["path"], row["state"]) for row in rows] == [("/api/groups/team/status", "needs_review")]
 
 
+@pytest.mark.parametrize('username', [42, True, ['name'], {'name': 'x'}, None, ''])
+def test_user_creation_rejects_non_string_or_empty_username_before_remote_calls(api, username):
+    client, admin, s3, operations = api
+    response = client.post('/api/v1/management/mgmt_1/iam/users', json={'username': username})
+    assert response.status_code == 422
+    assert response.json()['error']['code'] == 'INVALID_USERNAME'
+    assert admin.calls == [] and s3.calls == [] and operations == []
+
+
+@pytest.mark.parametrize(('path', 'code'), [
+    ('buckets/photos/versioning', 'INVALID_VERSIONING_STATUS'),
+    ('iam/users/alice/access-keys/AKIA/status', 'INVALID_ACCESS_KEY_STATUS'),
+    ('iam/groups/team/status', 'INVALID_GROUP_STATUS'),
+])
+@pytest.mark.parametrize('status', [[], {}, True, 1, None])
+def test_resource_status_rejects_non_strings_before_remote_calls(api, path, code, status):
+    client, admin, s3, operations = api
+    response = client.put('/api/v1/management/mgmt_1/' + path, json={'status': status})
+    assert response.status_code == 422
+    assert response.json()['error']['code'] == code
+    assert admin.calls == [] and s3.calls == [] and operations == []
+
+
+def test_bucket_delete_replays_persisted_receipt_without_rechecking_missing_bucket(tmp_path, monkeypatch):
+    admin = HttpIamAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    with db.connect(settings) as conn:
+        conn.execute('UPDATE management_connections SET permissions_json=?',
+                     (json.dumps({'bucket.manage': True, 'bucket_write_prefixes': ['photos']}),))
+    s3 = FakeS3()
+    original_list = s3.list_objects_v2
+
+    def list_objects(**kwargs):
+        if s3.deleted:
+            raise S3Error('NoSuchBucket')
+        return original_list(**kwargs)
+
+    monkeypatch.setattr(s3, 'list_objects_v2', list_objects)
+    monkeypatch.setattr(management, 'associated_s3_client', lambda *args: s3)
+    url = '/api/v1/management/mgmt_http/buckets/photos'
+    missing_key = client.delete(url)
+    assert missing_key.status_code == 422
+    assert missing_key.json()['error']['code'] == 'IDEMPOTENCY_KEY_REQUIRED'
+    assert s3.calls == []
+    first = client.delete(url, headers={'Idempotency-Key': 'delete-once'})
+    assert first.status_code == 200, first.text
+    assert first.json()['status'] == 'confirmed'
+    calls = list(s3.calls)
+    replay = client.delete(url, headers={'Idempotency-Key': 'delete-once'})
+    assert replay.status_code == 200, replay.text
+    assert replay.json()['replayed'] is True
+    assert replay.json()['operation_id'] == first.json()['operation_id']
+    assert replay.json()['status'] == 'confirmed'
+    assert s3.calls == calls
+    conflict = client.delete(url + '-other', headers={'Idempotency-Key': 'delete-once'})
+    assert conflict.status_code == 409
+    assert conflict.json()['error']['code'] == 'IDEMPOTENCY_CONFLICT'
+    assert s3.calls == calls
+
+
+def test_http_user_receipt_accepts_oss448_null_empty_lists_and_keeps_secret_one_time(tmp_path, monkeypatch):
+    class NullSliceAdmin(HttpIamAdmin):
+
+        def _user_details(self, username):
+            details = super()._user_details(username)
+            for field in ('actions', 'policy_names', 'groups'):
+                if details.get(field) == []:
+                    details[field] = None
+            for key in details['access_keys']:
+                key['status'] = ''
+            return details
+
+    admin = NullSliceAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/users'
+    body = {'username': 'null-slices', 'email': '', 'actions': ['Read'], 'policy_names': [], 'generate_key': True}
+    created = client.post(url, json=body, headers={'Idempotency-Key': 'null-slices-create'})
+    assert created.status_code == 200, created.text
+    assert created.json()['status'] == 'confirmed'
+    assert created.json()['created_credentials'] == {'access_key': 'AK1', 'secret_key': 'secret-1'}
+    assert created.json()['secret_receipt_available'] is True
+    assert created.json()['result']['readback']['policy_names'] is None
+    assert 'secret-1' not in json.dumps(created.json()['result'])
+    replay = client.post(url, json=body, headers={'Idempotency-Key': 'null-slices-create'})
+    assert replay.json()['status'] == 'confirmed' and replay.json()['replayed'] is True
+    assert replay.json()['secret_receipt_available'] is False
+    assert 'created_credentials' not in replay.json()
+    assert sum(method == 'POST' and path == '/api/users' for method, path, _ in admin.requests) == 1
+    updated = client.put(url + '/null-slices', json={'email': '', 'actions': [], 'policy_names': []},
+                         headers={'Idempotency-Key': 'null-slices-update'})
+    assert updated.status_code == 200
+    assert updated.json()['status'] == 'confirmed'
+    assert updated.json()['result']['readback']['actions'] is None
+    with db.connect(settings) as conn:
+        for row in conn.execute('SELECT * FROM management_operations'):
+            assert 'secret-1' not in json.dumps(dict(row))
+
+
+@pytest.mark.parametrize('field', ['actions', 'policy_names'])
+@pytest.mark.parametrize('actual', ['', {}, False, 0, ['unexpected']])
+def test_user_empty_list_verification_rejects_wrong_typed_or_nonempty_readback(field, actual):
+    assert management_resources._user_fields_match('alice', {field: []})(None, {'username': 'alice', field: actual}, {}) is False
+
+
+@pytest.mark.parametrize('field', ['actions', 'policy_names'])
+def test_user_null_list_verification_requires_presence_and_empty_expectation(field):
+    assert management_resources._user_fields_match('alice', {field: []})(None, {'username': 'alice'}, {}) is False
+    assert management_resources._user_fields_match('alice', {field: ['Read']})(None, {'username': 'alice', field: None}, {}) is False
+    assert management_resources._user_fields_match('alice', {field: []})(None, {'username': 'other', field: None}, {}) is False
+    assert management_resources._user_fields_match('alice', {'email': ''})(None, {'username': 'alice', 'email': None}, {}) is False
+
+
+def test_http_user_receipt_accepts_oss448_user_wrapper_and_keeps_secret_one_time(tmp_path, monkeypatch):
+    class NullSliceAdmin(HttpIamAdmin):
+        def _handle_api(self, method, path, body, params):
+            result = super()._handle_api(method, path, body, params)
+            if method == 'POST' and path == '/api/users' and body.get('generate_key'):
+                return {'message': 'User created successfully', 'user': {
+                    'username': body['username'], 'email': body['email'],
+                    'access_key': result['access_key'], 'secret_key': result['secret_key'],
+                    'permissions': body['actions'], 'policy_names': body['policy_names'], 'is_static': False,
+                }}
+            return result
+
+
+    admin = NullSliceAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/users'
+    body = {'username': 'null-slices', 'email': '', 'actions': ['Read'], 'policy_names': [], 'generate_key': True}
+    created = client.post(url, json=body, headers={'Idempotency-Key': 'null-slices-create'})
+    assert created.status_code == 200, created.text
+    assert created.json()['status'] == 'confirmed'
+    assert created.json()['created_credentials'] == {'access_key': 'AK1', 'secret_key': 'secret-1'}
+    assert created.json()['secret_receipt_available'] is True
+    assert created.json()['result']['readback']['policy_names'] == []
+    assert 'secret-1' not in json.dumps(created.json()['result'])
+    replay = client.post(url, json=body, headers={'Idempotency-Key': 'null-slices-create'})
+    assert replay.json()['status'] == 'confirmed' and replay.json()['replayed'] is True
+    assert replay.json()['secret_receipt_available'] is False
+    assert 'created_credentials' not in replay.json()
+    assert sum(method == 'POST' and path == '/api/users' for method, path, _ in admin.requests) == 1
+    updated = client.put(url + '/null-slices', json={'email': '', 'actions': [], 'policy_names': []},
+                         headers={'Idempotency-Key': 'null-slices-update'})
+    assert updated.status_code == 200
+    assert updated.json()['status'] == 'confirmed'
+    assert updated.json()['result']['readback']['actions'] == []
+    with db.connect(settings) as conn:
+        for row in conn.execute('SELECT * FROM management_operations'):
+            assert 'secret-1' not in json.dumps(dict(row))
+
+
+@pytest.mark.parametrize('response', [
+    {'user': {'username': 'other', 'access_key': 'AK1'}},
+    {'user': {'access_key': 'AK1'}},
+    {'user': {'username': 'alice', 'access_key': 'wrong-key'}},
+    {'user': None, 'access_key': 'AK1'},
+    {'user': [], 'access_key': 'AK1'},
+    {'other_wrapper': {'username': 'alice', 'access_key': 'AK1'}},
+])
+def test_created_user_credentials_require_known_wrapper_identity_and_visible_key(response):
+    after = {'username': 'alice', 'email': '', 'actions': ['Read'], 'policy_names': [],
+             'access_keys': [{'access_key': 'AK1', 'status': ''}], 'groups': None}
+    verify = management_resources._created_user_matches('alice', {
+        'email': '', 'actions': ['Read'], 'policy_names': [], 'generate_key': True,
+    })
+    assert verify(None, after, response) is False
+
+
 @pytest.mark.parametrize('field', ['Action', 'NotAction', 'Resource', 'NotResource'])
 @pytest.mark.parametrize('reverse', [False, True])
 def test_iam_and_bucket_policy_verify_standard_singleton_scalar_forms(field, reverse):

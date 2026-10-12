@@ -442,7 +442,7 @@ def _directory_preview_hash(directory: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps({"path": path, "entries": summary}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _delete_preview_hash(path: str, items: list[Mapping[str, Any]], *, complete: bool) -> str:
+def _delete_preview_hash(path: str, items: list[Mapping[str, Any]], *, complete: bool, management_id: str, endpoint: str) -> str:
     stable_items = [
         {
             "full_path": item.get("full_path"),
@@ -454,10 +454,10 @@ def _delete_preview_hash(path: str, items: list[Mapping[str, Any]], *, complete:
         for item in items
     ]
     stable_items.sort(key=lambda item: (str(item.get("full_path") or ""), str(item.get("name") or "")))
-    return hashlib.sha256(json.dumps({"path": path, "complete": complete, "items": stable_items}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps({"management_id": management_id, "endpoint": endpoint, "path": path, "complete": complete, "items": stable_items}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _delete_preview(base_url: str, path: str) -> dict[str, Any] | None:
+def _delete_preview(base_url: str, path: str, *, management_id: str) -> dict[str, Any] | None:
     directory = _native_directory(base_url, path)
     if directory is None:
         return None
@@ -506,7 +506,7 @@ def _delete_preview(base_url: str, path: str) -> dict[str, Any] | None:
         "entry_count": len(items),
         "truncated": truncated,
         "complete": complete,
-        "preview_hash": _delete_preview_hash(path, items, complete=complete),
+        "preview_hash": _delete_preview_hash(path, items, complete=complete, management_id=management_id, endpoint=base_url),
         "cas_atomic": False,
     }
 
@@ -742,10 +742,21 @@ def _s3_tables_namespace_exists(data: Any, namespace: str) -> bool:
 
 
 def _s3_tables_table(data: Any, name: str) -> Any | None:
-    for item in _list_field(data, "tables", "items"):
-        if name in json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False):
-            return item
-    return None
+    # The listing is scoped to the requested bucket and namespace. Descriptions,
+    # ARNs and similarly named tables are not evidence for the selected name.
+    matches = [item for item in _list_field(data, "tables", "items")
+               if isinstance(item, dict) and item.get("name") == name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _s3_tables_table_absent(data: Any, name: str) -> bool:
+    rows = data if isinstance(data, list) else None
+    if isinstance(data, dict):
+        rows = data.get("tables", data.get("items"))
+    # Unknown/malformed inventories and duplicate target rows do not prove deletion.
+    return (isinstance(rows, list)
+            and all(isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"] for item in rows)
+            and not any(item["name"] == name for item in rows))
 
 
 def _s3_table_empty(table: Any) -> bool:
@@ -753,15 +764,15 @@ def _s3_table_empty(table: Any) -> bool:
         return False
     if not isinstance(table, dict):
         return False
+    observed = False
     for key in ("row_count", "rows", "observed_row_count", "record_count", "records"):
         value = table.get(key)
         if value is None or value == "":
             continue
-        try:
-            return int(value) == 0
-        except (TypeError, ValueError):
-            return str(value).lower() in {"0", "zero", "empty"}
-    return False
+        observed = True
+        if not ((type(value) is int and value == 0) or (isinstance(value, str) and value.strip() == "0")):
+            return False
+    return observed
 
 
 def _policy_matches(data: Any, policy: str) -> bool:
@@ -1128,7 +1139,7 @@ def file_delete_preview(request: Request, management_id: str, path: str):
     _require_root(mgmt, clean, "file.read_roots")
     if _s3_bytes_path(clean):
         raise AppError("MANAGEMENT_S3_BYTES_FORBIDDEN", "raw Filer deletes under /buckets are blocked; use S3-scoped APIs.", 403)
-    preview = _delete_preview(_endpoint(mgmt, "filer"), clean)
+    preview = _delete_preview(_endpoint(mgmt, "filer"), clean, management_id=management_id)
     if preview is None:
         raise AppError("MANAGEMENT_NOT_DIRECTORY", "delete preview is only available for Filer directories.", 422, field="path")
     return preview
@@ -1201,7 +1212,7 @@ def delete_file(request: Request, management_id: str, body: dict[str, Any]):
     clean = _canonical_path(str(body.get("path") or ""), allow_root=False)
     _require_write_root(mgmt, clean)
     filer = _endpoint(mgmt, "filer")
-    directory_preview = _delete_preview(filer, clean)
+    directory_preview = _delete_preview(filer, clean, management_id=management_id)
     if (
         directory_preview is not None
         and body.get("confirm_recursive") is True
@@ -1217,7 +1228,7 @@ def delete_file(request: Request, management_id: str, body: dict[str, Any]):
     def invoke() -> Any:
         if not _native_exists(filer, clean):
             raise AppError("NATIVE_NOT_FOUND", "native resource was not found.", 404)
-        current_preview = _delete_preview(filer, clean)
+        current_preview = _delete_preview(filer, clean, management_id=management_id)
         if current_preview is not None:
             if current_preview.get("complete") is not True:
                 raise AppError("MANAGEMENT_DELETE_PREVIEW_INCOMPLETE", "directory delete preview is truncated; recursive delete is not allowed.", 409)
@@ -1792,14 +1803,20 @@ def s3_table_delete_table(request: Request, management_id: str, body: dict[str, 
     namespace = _required_text(body, "namespace")
     name = _segment(_required_text(body, "name"), "name")
     version = str(body.get("version") or "")
-    before = _admin_request_json(settings, mgmt, "GET", "/api/s3tables/tables", params={"bucket": bucket_arn, "namespace": namespace})
-    table = _s3_tables_table(before, name)
-    if body.get("confirm_empty") is not True or not _s3_table_empty(table):
+    if body.get("confirm_empty") is not True:
         raise AppError("MANAGEMENT_TABLE_DELETE_REQUIRES_EMPTY_CONFIRMATION", "table delete requires confirm_empty=true and an empty observed table.", 409)
     params = {"bucket": bucket_arn, "namespace": namespace, "name": name}
     if version:
         params["version"] = version
     payload = {"bucket_arn": bucket_arn, "namespace": namespace, "name": name, "version": version}
+
+    def invoke() -> Any:
+        # Check the exact target immediately before dispatch, after receipt replay.
+        listing = _admin_request_json(settings, mgmt, "GET", "/api/s3tables/tables", params={"bucket": bucket_arn, "namespace": namespace})
+        if not _s3_table_empty(_s3_tables_table(listing, name)):
+            raise AppError("MANAGEMENT_TABLE_DELETE_REQUIRES_EMPTY_CONFIRMATION", "table delete requires confirm_empty=true and an empty observed table.", 409)
+        return _admin_request_json(settings, mgmt, "DELETE", "/api/s3tables/tables", params=params)
+
     return _management_ops_module().perform_operation(
         settings,
         mgmt,
@@ -1810,9 +1827,9 @@ def s3_table_delete_table(request: Request, management_id: str, body: dict[str, 
         payload,
         params=params,
         idempotency_key=body.get("idempotency_key"),
-        invoke=lambda: _admin_request_json(settings, mgmt, "DELETE", "/api/s3tables/tables", params=params),
+        invoke=invoke,
         readback=lambda: _admin_request_json(settings, mgmt, "GET", "/api/s3tables/tables", params={"bucket": bucket_arn, "namespace": namespace}),
-        verify=lambda _before, after, response: bool(response) and _s3_tables_table(after, name) is None,
+        verify=lambda _before, after, response: bool(response) and _s3_tables_table_absent(after, name),
     )
 
 

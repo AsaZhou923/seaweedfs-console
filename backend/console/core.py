@@ -60,6 +60,8 @@ def bootstrap_admin(conn: sqlite3.Connection, settings: Settings) -> dict[str, A
 
 
 def login(conn: sqlite3.Connection, settings: Settings, username: str, password: str) -> dict[str, Any]:
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise AppError("UNAUTHENTICATED", "Invalid username or password.", 401)
     row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
         raise AppError("UNAUTHENTICATED", "Invalid username or password.", 401)
@@ -288,6 +290,16 @@ def create_scope(conn: sqlite3.Connection, project_id: str, data: dict[str, Any]
     _connection_private(conn, _require(data, "connection_id"))
     bucket = _require(data, "bucket")
     prefix = data.get("prefix", "")
+    if not isinstance(prefix, str):
+        raise AppError("INVALID_REQUEST", "Scope prefix must be a string.", 422, field="prefix")
+    policy = data.get("scope_policy", {})
+    if not isinstance(policy, dict):
+        raise AppError("INVALID_REQUEST", "Scope policy must be an object.", 422, field="scope_policy")
+    for source, fields in ((data, ("writable", "manage_bucket", "overlap_ack")),
+                           (policy, ("allow_preview", "allow_original_download"))):
+        for field in fields:
+            if field in source and not isinstance(source[field], bool):
+                raise AppError("INVALID_REQUEST", f"{field} must be a boolean.", 422, field=field)
     overlaps = _scope_overlaps(conn, data["connection_id"], bucket, prefix)
     if overlaps and not data.get("overlap_ack"):
         raise AppError(
@@ -298,7 +310,6 @@ def create_scope(conn: sqlite3.Connection, project_id: str, data: dict[str, Any]
         )
     now = utc_now()
     scope_id = new_id("scp_")
-    policy = data.get("scope_policy", {})
     conn.execute(
         """
         INSERT INTO scopes(

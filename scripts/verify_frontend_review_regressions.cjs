@@ -14,6 +14,14 @@ let authMode = "auth";
 let projectScopesMode = "normal";
 let projectScopesReadCount = 0;
 let presetProjectMode = "normal";
+let projectTwoScopesGate = null;
+let connectionsGate = null;
+
+function responseGate() {
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  return { promise, release, entered: false, fail: false };
+}
 
 const project = { id: "project-1", project_key: "project-1", display_name: "Mock Project" };
 const projectTwo = { id: "project-2", project_key: "project-2", display_name: "Second Project" };
@@ -75,13 +83,25 @@ async function routeApi(req, res, url) {
   if (pathname === "/api/v1/auth/me") return json(res, { user: { username: "reviewer" }, csrf_token: "csrf", projects: [project, projectTwo] });
   if (pathname === "/api/v1/auth/login" && authMode !== "auth") return json(res, { error: { code: "UNAUTHENTICATED", message: "Invalid username or password." } }, 401);
   if (pathname === "/api/v1/auth/login") return json(res, { user: { username: "reviewer" }, csrf_token: "csrf" });
-  if (pathname === "/api/v1/connections") return json(res, { items: [{ id: "s3-1", display_name: "Mock S3", endpoint_url: "http://mock-s3.invalid", secret_ref: "mock-secret" }] });
+  if (pathname === "/api/v1/connections") {
+    const gate = connectionsGate;
+    if (gate) { gate.entered = true; await gate.promise; }
+    return json(res, { items: [{ id: "s3-1", display_name: "Mock S3", endpoint_url: "http://mock-s3.invalid", secret_ref: "mock-secret" }] });
+  }
   if (pathname === "/api/v1/projects/project-1/scopes") {
     projectScopesReadCount += 1;
     if (projectScopesMode === "delayed-second-scope-read" && projectScopesReadCount === 2) await wait(350);
     return json(res, { items: scopes });
   }
-  if (pathname === "/api/v1/projects/project-2/scopes") return json(res, { items: projectTwoScopes });
+  if (pathname === "/api/v1/projects/project-2/scopes") {
+    const gate = projectTwoScopesGate;
+    if (gate) {
+      gate.entered = true;
+      await gate.promise;
+      if (gate.fail) return json(res, { error: { code: "PROJECT_SCOPES_UNAVAILABLE", message: "Project scopes unavailable." } }, 503);
+    }
+    return json(res, { items: projectTwoScopes });
+  }
   if (pathname === "/api/v1/projects/project-1/presets") {
     if (presetProjectMode === "delayed-project-one-presets") await wait(350);
     return json(res, { items: [{ id: "preset-old-project", name: "old-project-preset", version: 1, params: { mode: "fit", width: 320, height: 320, format: "webp" } }] });
@@ -114,6 +134,8 @@ async function routeApi(req, res, url) {
     return json(res, { items: [assetA], next_cursor: null });
   }
   if (pathname === "/api/v1/scopes/scope-b/assets") return json(res, { items: [], next_cursor: null });
+  if (pathname === "/api/v1/scopes/scope-c/assets") return json(res, { items: [], next_cursor: null });
+  if (pathname === "/api/v1/scopes/scope-a/assets/asset-a-1") return json(res, { asset: assetA, objects: [assetA], references: [] });
   if (pathname.includes("/objects/obj-a-1/preview")) return text(res, "mock-image", 200, "image/jpeg");
   if (pathname.includes("/objects/obj-a-1/versions")) return json(res, { items: [{ version_id: "v-a-1", is_latest: true, size: 12345, last_modified: "2026-10-05T00:00:00Z" }] });
   if (pathname === "/api/v1/scopes/scope-a/bucket/cors") {
@@ -495,6 +517,132 @@ async function tableDetailsDiagnostics(page) {
   };
 }
 
+// Hold real HTTP responses at the server so the old context remains in flight.
+// The injected observer records response-body consumption without changing data.
+async function verifyProjectContextRaces(browser, base, pageFactory = createPage) {
+  const failures = [];
+  const evidence = [];
+  let page;
+  const check = (condition, message) => { if (!condition) failures.push(message); };
+  const settled = () => page.eval(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  const snapshot = () => page.eval(`({
+    project: document.querySelector(".contextBar select")?.value || "",
+    scope: [...document.querySelectorAll(".contextBar select")].at(-1)?.value || "",
+    scopeOptions: [...document.querySelectorAll(".contextBar select")].at(-1) ? [...[...document.querySelectorAll(".contextBar select")].at(-1).options].map((option) => option.value).filter(Boolean) : [],
+    assetCards: [...document.querySelectorAll("article.asset strong")].map((node) => node.textContent || ""),
+    selectedAssets: document.querySelectorAll("article.asset input[type=checkbox]:checked").length,
+    drawer: Boolean(document.querySelector(".drawer")),
+    previewDisabled: [...document.querySelectorAll("button")].find((node) => node.textContent === "Submit preview job")?.disabled,
+    exportDisabled: [...document.querySelectorAll("button")].find((node) => node.textContent === "Download report")?.disabled,
+    body: document.body.innerText
+  })`);
+  const observeBodies = () => page.eval(`(() => {
+    window.__projectRaceBodies = [];
+    const original = Response.prototype.text;
+    Response.prototype.text = async function (...args) {
+      const body = await original.apply(this, args);
+      window.__projectRaceBodies.push(new URL(this.url, location.href).pathname);
+      return body;
+    };
+  })()`);
+  const observeEmptyContext = (state, label) => {
+    check(state.project === "project-2", `${label}: visible project must remain project-2`);
+    check(state.scope === "", `${label}: previous project's Scope must be cleared`);
+    check(state.scopeOptions.length === 0, `${label}: previous project's Scope options must be removed`);
+    check(state.assetCards.length === 0 && state.selectedAssets === 0, `${label}: previous assets and selections must be cleared`);
+    check(!state.drawer, `${label}: previous asset detail must be cleared`);
+    check(state.previewDisabled && state.exportDisabled, `${label}: Scope actions must be disabled`);
+  };
+  const openAssets = async (holdBootstrap = false) => {
+    const start = requests.length;
+    page = await pageFactory(browser, `${base}/#assets`);
+    await page.eval(helpers);
+    await waitFor(page, `document.querySelectorAll("article.asset").length > 0`);
+    if (!holdBootstrap) {
+      await waitUntil(() => requests.slice(start).filter((item) => item.pathname === "/api/v1/projects/project-1/scopes").length >= 2, "initial and bootstrap Scope reads");
+      await settled();
+    }
+    await observeBodies();
+  };
+  try {
+    authMode = "auth";
+    projectScopesMode = "normal";
+    for (const fail of [false, true]) {
+      await openAssets();
+      await page.eval(`document.querySelector("article.asset input[type=checkbox]").click(); window.__test.clickText("scope-a-photo.jpg")`);
+      await waitFor(page, `Boolean(document.querySelector(".drawer"))`);
+      projectTwoScopesGate = responseGate();
+      projectTwoScopesGate.fail = fail;
+      await page.eval(`window.__test.setContextProject("project-2")`);
+      await waitUntil(() => projectTwoScopesGate.entered, "held project-2 Scope request");
+      await settled();
+      const pending = await snapshot();
+      observeEmptyContext(pending, fail ? "failed-switch pending" : "delayed-switch pending");
+      projectTwoScopesGate.release();
+      await waitFor(page, `window.__projectRaceBodies.includes("/api/v1/projects/project-2/scopes")`);
+      await settled();
+      const completed = await snapshot();
+      if (fail) {
+        observeEmptyContext(completed, "failed-switch completed");
+        check(completed.body.includes("PROJECT_SCOPES_UNAVAILABLE"), "failed-switch: Scope error must remain visible");
+      } else {
+        check(completed.project === "project-2" && completed.scope === "scope-c", "delayed-switch: successful response must select only the new project's Scope");
+      }
+      evidence.push({ case: fail ? "failed-project-scopes" : "delayed-project-scopes", pending, completed });
+      projectTwoScopesGate = null;
+      page.close(); page = null;
+    }
+
+    for (const fail of [false, true]) {
+      await openAssets();
+      projectTwoScopesGate = responseGate();
+      projectTwoScopesGate.fail = fail;
+      await page.eval(`window.__test.setContextProject("project-2")`);
+      await waitUntil(() => projectTwoScopesGate.entered, "reversed project-2 Scope request");
+      await page.eval(`window.__test.setContextProject("project-1")`);
+      await waitFor(page, `document.querySelectorAll(".contextBar select")[0]?.value === "project-1" && [...document.querySelectorAll(".contextBar select")].at(-1)?.value === "scope-a"`);
+      projectTwoScopesGate.release();
+      await waitFor(page, `window.__projectRaceBodies.includes("/api/v1/projects/project-2/scopes")`);
+      await settled();
+      const reversed = await snapshot();
+      check(reversed.project === "project-1" && reversed.scope === "scope-a", "reversed-switch: late project-2 response must not overwrite project-1");
+      check(!reversed.scopeOptions.includes("scope-c"), "reversed-switch: foreign Scope options must not reappear");
+      check(!reversed.body.includes("PROJECT_SCOPES_UNAVAILABLE"), "reversed-switch: a stale Scope error must not appear in the new context");
+      evidence.push({ case: fail ? "reversed-failed-project-scopes" : "reversed-project-scopes", completed: reversed });
+      projectTwoScopesGate = null;
+      page.close(); page = null;
+    }
+
+    connectionsGate = responseGate();
+    await openAssets(true);
+    await waitUntil(() => connectionsGate.entered, "held bootstrap connections read");
+    await page.eval(`window.__test.setContextProject("project-2")`);
+    await waitFor(page, `[...document.querySelectorAll(".contextBar select")].at(-1)?.value === "scope-c"`);
+    const beforeRelease = requests.length;
+    connectionsGate.release();
+    await waitFor(page, `window.__projectRaceBodies.includes("/api/v1/management/connections")`);
+    await settled();
+    const staleScopeRead = requests.slice(beforeRelease).some((item) => item.pathname === "/api/v1/projects/project-1/scopes");
+    if (staleScopeRead) {
+      await waitFor(page, `window.__projectRaceBodies.includes("/api/v1/projects/project-1/scopes")`);
+      await settled();
+    }
+    const bootstrap = await snapshot();
+    check(!staleScopeRead, "late-bootstrap: captured project-1 must not start a Scope refresh after selection changed");
+    check(bootstrap.project === "project-2" && bootstrap.scope === "scope-c", "late-bootstrap: project and Scope must stay bound to project-2");
+    evidence.push({ case: "late-bootstrap-connections", staleScopeRead, completed: bootstrap });
+    console.log(JSON.stringify({ projectContextCases: evidence, failures }, null, 2));
+    assert.deepEqual(failures, [], "Project/Scope context regression failures");
+    return { cases: evidence.length, failures: 0 };
+  } finally {
+    projectTwoScopesGate?.release();
+    connectionsGate?.release();
+    projectTwoScopesGate = null;
+    connectionsGate = null;
+    if (page) page.close();
+  }
+}
+
 async function main() {
   assert.ok(fs.existsSync(path.join(dist, "index.html")), "Run npm run build --prefix frontend before this regression check.");
   let server;
@@ -504,6 +652,10 @@ async function main() {
     server = await startServer();
     browser = await launchCdp();
     const base = `http://127.0.0.1:${server.address().port}`;
+    if (process.env.SWC_REGRESSION_PROJECT_CONTEXT_ONLY) {
+      await verifyProjectContextRaces(browser, base);
+      return;
+    }
     authMode = "unauth";
     page = await createPage(browser, `${base}/#assets`);
     await waitFor(page, `document.body.innerText.includes("Sign in")`);
@@ -823,7 +975,9 @@ async function main() {
     assert.ok(new URLSearchParams(uploads[0].search).get("idempotency_key"), "upload should include query idempotency_key");
     assert.equal(new URLSearchParams(uploads[0].search).get("idempotency_key"), uploads[0].idempotencyKey, "upload query key should match header key");
 
-    console.log(JSON.stringify({ loginStorageClear: loginStorage === "", accessPolicyLocalNoDurableIntent: !accessPolicyWrite.idempotencyKey && !accessPolicyWrite.xIdempotencyKey && !Object.prototype.hasOwnProperty.call(JSON.parse(accessPolicyWrite.body), "idempotency_key"), assets: { initial, empty, scopeB, afterRace }, tablePreviewCleared: true, anomalousReceiptKeys, terminalReceiptKeys, idempotencyKeys: allWrites.map((item) => item.idempotencyKey), bucketCreateHeaderOnly: true, uploadKey: uploads[0].idempotencyKey, requestCount: requests.length }, null, 2));
+    page.close(); page = null;
+    const projectContext = await verifyProjectContextRaces(browser, base);
+    console.log(JSON.stringify({ loginStorageClear: loginStorage === "", accessPolicyLocalNoDurableIntent: !accessPolicyWrite.idempotencyKey && !accessPolicyWrite.xIdempotencyKey && !Object.prototype.hasOwnProperty.call(JSON.parse(accessPolicyWrite.body), "idempotency_key"), assets: { initial, empty, scopeB, afterRace }, tablePreviewCleared: true, anomalousReceiptKeys, terminalReceiptKeys, idempotencyKeys: allWrites.map((item) => item.idempotencyKey), bucketCreateHeaderOnly: true, uploadKey: uploads[0].idempotencyKey, projectContext, requestCount: requests.length }, null, 2));
   } finally {
     if (page) page.close();
     await stopBrowser(browser);
@@ -831,7 +985,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { startServer, closeServer, verifyProjectContextRaces };
