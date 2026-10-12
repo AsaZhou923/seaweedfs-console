@@ -1021,8 +1021,13 @@ def create_bucket(request: Request, management_id: str, body: dict[str, Any]):
 @router.delete("/{management_id}/buckets/{bucket}")
 def delete_bucket(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    _ensure_empty_bucket_for_delete(request, mgmt, bucket)
     s3 = _associated_s3(request, mgmt)
+    def invoke():
+        # Replay a persisted receipt before consulting a bucket that the first
+        # attempt may already have deleted.
+        _ensure_empty_bucket_for_delete(request, mgmt, bucket)
+        return s3.delete_bucket(Bucket=bucket)
+
     try:
         return _mutate(
             request,
@@ -1031,7 +1036,7 @@ def delete_bucket(request: Request, management_id: str, bucket: str):
             method="DELETE",
             path=f"/s3/buckets/{_q(bucket)}",
             payload={"bucket": bucket},
-            invoke=lambda: s3.delete_bucket(Bucket=bucket),
+            invoke=invoke,
             readback=_s3_bucket_readback(s3, bucket),
             verify=_deleted,
         )
@@ -1061,7 +1066,7 @@ def get_bucket_versioning(request: Request, management_id: str, bucket: str):
 def update_bucket_versioning(request: Request, management_id: str, bucket: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     status = body.get("status")
-    if status not in {"Enabled", "Suspended"}:
+    if not isinstance(status, str) or status not in {"Enabled", "Suspended"}:
         raise AppError("INVALID_VERSIONING_STATUS", "status must be Enabled or Suspended", 422)
     s3 = _associated_s3(request, mgmt)
     payload = {"bucket": bucket, "versioning_configuration": {"Status": status}}
@@ -1218,14 +1223,12 @@ def create_user(request: Request, management_id: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     _reject_manual_secret(body)
     payload = {
-        "username": body.get("username"),
+        "username": _required_string(body, "username", code="INVALID_USERNAME"),
         "email": _optional_string(body, "email", ""),
         "actions": _string_list(body, "actions"),
         "generate_key": _optional_bool(body, "generate_key", False),
         "policy_names": _string_list(body, "policy_names"),
     }
-    if not payload["username"]:
-        raise AppError("INVALID_USERNAME", "username is required", 422)
     readback_path = f"/api/users/{_q(payload['username'])}"
     return _mutate(request, mgmt, action="iam.manage", method="POST", path="/api/users", payload=payload, readback=lambda: _admin_read_json_or_none(request.app.state.settings, mgmt, readback_path), verify=_created_user_matches(str(payload["username"]), payload), return_created_secret=payload["generate_key"])
 
@@ -1264,7 +1267,7 @@ def delete_access_key(request: Request, management_id: str, username: str, acces
 def update_access_key_status(request: Request, management_id: str, username: str, access_key_id: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     status = body.get("status")
-    if status not in {"Active", "Inactive"}:
+    if not isinstance(status, str) or status not in {"Active", "Inactive"}:
         raise AppError("INVALID_ACCESS_KEY_STATUS", "status must be Active or Inactive", 422)
     return _mutate(request, mgmt, action="iam.manage", method="PUT", path=f"/api/users/{_q(username)}/access-keys/{_q(access_key_id)}/status", payload={"status": status}, readback_path=f"/api/users/{_q(username)}", verify=_access_key_status(username, access_key_id, status))
 
@@ -1386,7 +1389,7 @@ def delete_group(request: Request, management_id: str, name: str):
 def set_group_status(request: Request, management_id: str, name: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     status = body.get("status")
-    if status not in {"enabled", "disabled"}:
+    if not isinstance(status, str) or status not in {"enabled", "disabled"}:
         raise AppError("INVALID_GROUP_STATUS", "status must be enabled or disabled", 422)
     return _mutate(request, mgmt, action="iam.manage", method="PUT", path=f"/api/groups/{_q(name)}/status", payload={"enabled": status == "enabled"}, readback_path=f"/api/groups/{_q(name)}", verify=_group_status(name, status))
 

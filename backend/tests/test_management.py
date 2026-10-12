@@ -865,3 +865,34 @@ def test_endpoint_rejects_encoded_traversal(api):
     )
     assert response.status_code == 422
 
+
+def test_explicit_empty_access_policy_revokes_grants_and_omission_preserves(api):
+    client, settings, csrf, _admin = api
+    connection = create_connection(client, csrf)
+    url = f"/api/v1/management/connections/{connection['id']}/access-policy"
+    headers = {'Origin': 'http://testserver', 'X-CSRF-Token': csrf}
+    enabled = {'management_write_enabled': True, 'acknowledge_management_write': True}
+    granted = client.put(url, json={**enabled, 'permissions': {'iam.manage': True, 'file.manage': True,
+                                                            'file.write_roots': ['/owned']}}, headers=headers)
+    assert granted.status_code == 200
+    preserved = client.put(url, json=enabled, headers=headers)
+    assert preserved.status_code == 200
+    assert preserved.json()['permissions']['iam.manage'] is True
+    revoked = client.put(url, json={**enabled, 'permissions': {}}, headers=headers)
+    assert revoked.status_code == 200
+    assert revoked.json()['permissions'] == management.DEFAULT_PERMISSIONS
+    with db.connect(settings) as conn:
+        row = conn.execute('SELECT permissions_json FROM management_connections WHERE id=?', (connection['id'],)).fetchone()
+        assert json.loads(row[0]) == management.DEFAULT_PERMISSIONS
+
+
+@pytest.mark.parametrize('permissions', [None, [], '', False, 0])
+def test_access_policy_rejects_present_falsey_non_object_permissions(api, permissions):
+    client, settings, csrf, _admin = api
+    connection = create_connection(client, csrf)
+    response = client.put(f"/api/v1/management/connections/{connection['id']}/access-policy",
+                          json={'management_write_enabled': False, 'permissions': permissions},
+                          headers={'Origin': 'http://testserver', 'X-CSRF-Token': csrf})
+    assert response.status_code == 422
+    with db.connect(settings) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM management_access_events').fetchone()[0] == 0

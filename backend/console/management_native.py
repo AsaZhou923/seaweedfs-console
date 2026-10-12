@@ -442,7 +442,7 @@ def _directory_preview_hash(directory: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps({"path": path, "entries": summary}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _delete_preview_hash(path: str, items: list[Mapping[str, Any]], *, complete: bool) -> str:
+def _delete_preview_hash(path: str, items: list[Mapping[str, Any]], *, complete: bool, management_id: str, endpoint: str) -> str:
     stable_items = [
         {
             "full_path": item.get("full_path"),
@@ -454,10 +454,10 @@ def _delete_preview_hash(path: str, items: list[Mapping[str, Any]], *, complete:
         for item in items
     ]
     stable_items.sort(key=lambda item: (str(item.get("full_path") or ""), str(item.get("name") or "")))
-    return hashlib.sha256(json.dumps({"path": path, "complete": complete, "items": stable_items}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps({"management_id": management_id, "endpoint": endpoint, "path": path, "complete": complete, "items": stable_items}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def _delete_preview(base_url: str, path: str) -> dict[str, Any] | None:
+def _delete_preview(base_url: str, path: str, *, management_id: str) -> dict[str, Any] | None:
     directory = _native_directory(base_url, path)
     if directory is None:
         return None
@@ -506,7 +506,7 @@ def _delete_preview(base_url: str, path: str) -> dict[str, Any] | None:
         "entry_count": len(items),
         "truncated": truncated,
         "complete": complete,
-        "preview_hash": _delete_preview_hash(path, items, complete=complete),
+        "preview_hash": _delete_preview_hash(path, items, complete=complete, management_id=management_id, endpoint=base_url),
         "cas_atomic": False,
     }
 
@@ -1139,7 +1139,7 @@ def file_delete_preview(request: Request, management_id: str, path: str):
     _require_root(mgmt, clean, "file.read_roots")
     if _s3_bytes_path(clean):
         raise AppError("MANAGEMENT_S3_BYTES_FORBIDDEN", "raw Filer deletes under /buckets are blocked; use S3-scoped APIs.", 403)
-    preview = _delete_preview(_endpoint(mgmt, "filer"), clean)
+    preview = _delete_preview(_endpoint(mgmt, "filer"), clean, management_id=management_id)
     if preview is None:
         raise AppError("MANAGEMENT_NOT_DIRECTORY", "delete preview is only available for Filer directories.", 422, field="path")
     return preview
@@ -1212,7 +1212,7 @@ def delete_file(request: Request, management_id: str, body: dict[str, Any]):
     clean = _canonical_path(str(body.get("path") or ""), allow_root=False)
     _require_write_root(mgmt, clean)
     filer = _endpoint(mgmt, "filer")
-    directory_preview = _delete_preview(filer, clean)
+    directory_preview = _delete_preview(filer, clean, management_id=management_id)
     if (
         directory_preview is not None
         and body.get("confirm_recursive") is True
@@ -1228,7 +1228,7 @@ def delete_file(request: Request, management_id: str, body: dict[str, Any]):
     def invoke() -> Any:
         if not _native_exists(filer, clean):
             raise AppError("NATIVE_NOT_FOUND", "native resource was not found.", 404)
-        current_preview = _delete_preview(filer, clean)
+        current_preview = _delete_preview(filer, clean, management_id=management_id)
         if current_preview is not None:
             if current_preview.get("complete") is not True:
                 raise AppError("MANAGEMENT_DELETE_PREVIEW_INCOMPLETE", "directory delete preview is truncated; recursive delete is not allowed.", 409)

@@ -1561,6 +1561,25 @@ def test_s3_tables_native_crud_requires_flags_and_precise_readback(api):
     ]
 
 
+def test_recursive_delete_preview_cannot_cross_management_connections(api):
+    client, settings, csrf, native = api
+    first = create_connection(client, settings, csrf, write=True)
+    second = create_connection(client, settings, csrf, write=True)
+    preview = client.get(f"/api/v1/management/{first['id']}/files/delete-preview", params={'path': '/safe/dir'})
+    assert preview.status_code == 200
+    before = len([item for item in native.requests if item.method == 'DELETE'])
+    response = client.post(f"/api/v1/management/{second['id']}/files/delete", headers=headers(csrf), json={
+        'path': '/safe/dir', 'confirm_recursive': True, 'recursive_preview_path': '/safe/dir',
+        'recursive_preview_hash': preview.json()['preview_hash'], 'idempotency_key': 'cross-connection-preview',
+    })
+    assert response.status_code == 409
+    assert '/safe/dir' in native.dirs
+    assert len([item for item in native.requests if item.method == 'DELETE']) == before
+    own_preview = client.get(f"/api/v1/management/{second['id']}/files/delete-preview", params={'path': '/safe/dir'})
+    assert own_preview.status_code == 200
+    assert own_preview.json()['preview_hash'] != preview.json()['preview_hash']
+
+
 @pytest.mark.parametrize('target', [
     {'name': 'events', 'row_count': 250},
     {'name': 'other', 'description': 'events', 'row_count': 0},
