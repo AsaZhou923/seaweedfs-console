@@ -1309,3 +1309,55 @@ def test_bucket_delete_replays_persisted_receipt_without_rechecking_missing_buck
     assert conflict.status_code == 409
     assert conflict.json()['error']['code'] == 'IDEMPOTENCY_CONFLICT'
     assert s3.calls == calls
+
+
+def test_http_user_receipt_accepts_oss448_null_empty_lists_and_keeps_secret_one_time(tmp_path, monkeypatch):
+    class NullSliceAdmin(HttpIamAdmin):
+
+        def _user_details(self, username):
+            details = super()._user_details(username)
+            for field in ('actions', 'policy_names', 'groups'):
+                if details.get(field) == []:
+                    details[field] = None
+            for key in details['access_keys']:
+                key['status'] = ''
+            return details
+
+    admin = NullSliceAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/users'
+    body = {'username': 'null-slices', 'email': '', 'actions': ['Read'], 'policy_names': [], 'generate_key': True}
+    created = client.post(url, json=body, headers={'Idempotency-Key': 'null-slices-create'})
+    assert created.status_code == 200, created.text
+    assert created.json()['status'] == 'confirmed'
+    assert created.json()['created_credentials'] == {'access_key': 'AK1', 'secret_key': 'secret-1'}
+    assert created.json()['secret_receipt_available'] is True
+    assert created.json()['result']['readback']['policy_names'] is None
+    assert 'secret-1' not in json.dumps(created.json()['result'])
+    replay = client.post(url, json=body, headers={'Idempotency-Key': 'null-slices-create'})
+    assert replay.json()['status'] == 'confirmed' and replay.json()['replayed'] is True
+    assert replay.json()['secret_receipt_available'] is False
+    assert 'created_credentials' not in replay.json()
+    assert sum(method == 'POST' and path == '/api/users' for method, path, _ in admin.requests) == 1
+    updated = client.put(url + '/null-slices', json={'email': '', 'actions': [], 'policy_names': []},
+                         headers={'Idempotency-Key': 'null-slices-update'})
+    assert updated.status_code == 200
+    assert updated.json()['status'] == 'confirmed'
+    assert updated.json()['result']['readback']['actions'] is None
+    with db.connect(settings) as conn:
+        for row in conn.execute('SELECT * FROM management_operations'):
+            assert 'secret-1' not in json.dumps(dict(row))
+
+
+@pytest.mark.parametrize('field', ['actions', 'policy_names'])
+@pytest.mark.parametrize('actual', ['', {}, False, 0, ['unexpected']])
+def test_user_empty_list_verification_rejects_wrong_typed_or_nonempty_readback(field, actual):
+    assert management_resources._user_fields_match('alice', {field: []})(None, {'username': 'alice', field: actual}, {}) is False
+
+
+@pytest.mark.parametrize('field', ['actions', 'policy_names'])
+def test_user_null_list_verification_requires_presence_and_empty_expectation(field):
+    assert management_resources._user_fields_match('alice', {field: []})(None, {'username': 'alice'}, {}) is False
+    assert management_resources._user_fields_match('alice', {field: ['Read']})(None, {'username': 'alice', field: None}, {}) is False
+    assert management_resources._user_fields_match('alice', {field: []})(None, {'username': 'other', field: None}, {}) is False
+    assert management_resources._user_fields_match('alice', {'email': ''})(None, {'username': 'alice', 'email': None}, {}) is False
