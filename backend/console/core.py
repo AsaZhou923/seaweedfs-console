@@ -60,6 +60,8 @@ def bootstrap_admin(conn: sqlite3.Connection, settings: Settings) -> dict[str, A
 
 
 def login(conn: sqlite3.Connection, settings: Settings, username: str, password: str) -> dict[str, Any]:
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise AppError("UNAUTHENTICATED", "Invalid username or password.", 401)
     row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
         raise AppError("UNAUTHENTICATED", "Invalid username or password.", 401)

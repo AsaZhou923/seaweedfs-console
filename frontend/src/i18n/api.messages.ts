@@ -1,6 +1,7 @@
 type Message = { en: string; "zh-CN": string };
 
 export const apiMessages: Record<string, Message> = {
+  "Multipart upload is not active.": { en: "Multipart upload is not active.", "zh-CN": "分段上传当前不是活动状态。" },
   "Scope prefix must be a string.": { en: "Scope prefix must be a string.", "zh-CN": "Scope 前缀必须是字符串。" },
   "Scope policy must be an object.": { en: "Scope policy must be an object.", "zh-CN": "Scope 策略必须是对象。" },
   "{field} must be a boolean.": { en: "{field} must be a boolean.", "zh-CN": "{field} 必须是布尔值。" },

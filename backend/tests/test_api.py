@@ -383,6 +383,16 @@ def test_connection_create_rejects_secret_without_approved_endpoint(tmp_path: Pa
         assert client.get("/api/v1/connections").json()["items"] == []
 
 
+@pytest.mark.parametrize('username,password', [('admin', None), ('admin', {}), ('admin', []), ({}, 'pass'), (None, 'pass'), (7, 'pass')])
+def test_login_rejects_malformed_credentials_without_session(api, username, password):
+    client, app, _ = api
+    response = client.post('/api/v1/auth/login', json={'username': username, 'password': password}, headers={'Origin': 'http://testserver'})
+    assert response.status_code == 401
+    assert response.json()['error']['code'] == 'UNAUTHENTICATED'
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute('SELECT count(*) FROM sessions').fetchone()[0] == 0
+
+
 @pytest.mark.parametrize('change', [
     {'writable': 'false'}, {'writable': 1}, {'manage_bucket': 'false'}, {'manage_bucket': None},
     {'overlap_ack': 'false'}, {'scope_policy': None}, {'scope_policy': []},
