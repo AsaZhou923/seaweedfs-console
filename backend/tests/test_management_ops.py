@@ -161,3 +161,49 @@ def test_missing_generated_secret_is_not_an_available_receipt(ledger):
     assert result["status"] == "confirmed"
     assert result["secret_receipt_available"] is False
     assert "created_credentials" not in result
+
+
+@pytest.mark.parametrize(('action', 'payload', 'remaining_roots'), [
+    ('file.mkdir', {'path': '/owned', 'folder_name': 'new'}, []),
+    ('file.upload', {'path': '/owned', 'filename': 'new.txt'}, []),
+    ('file.delete', {'path': '/owned/old.txt'}, []),
+    ('file.rename', {'source_path': '/owned/source/a', 'target_path': '/owned/target/a'}, ['/owned/source']),
+    ('file.rename', {'source_path': '/owned/source/a', 'target_path': '/owned/target/a'}, ['/owned/target']),
+])
+def test_filer_root_revoked_during_readback_prevents_dispatch(ledger, action, payload, remaining_roots):
+    cfg, manager = ledger
+    manager['permissions'] = {'file.manage': True, 'file.write_roots': ['/owned']}
+    with db.connect(cfg) as conn:
+        conn.execute("UPDATE management_connections SET permissions_json=? WHERE id='mg'", (json.dumps(manager['permissions']),))
+    calls = []
+
+    def readback():
+        with db.connect(cfg) as conn:
+            conn.execute("UPDATE management_connections SET permissions_json=? WHERE id='mg'",
+                         (json.dumps({'file.manage': True, 'file.write_roots': remaining_roots}),))
+        return {'exists': False}
+
+    with pytest.raises(AppError) as error:
+        management_ops.perform_operation(cfg, manager, 'actor', action, 'POST', '/file', payload,
+                                         idempotency_key='revoked-file-root', readback=readback,
+                                         invoke=lambda: calls.append(True), verify=lambda *args: True)
+    assert error.value.code == 'MANAGEMENT_PATH_FORBIDDEN'
+    assert calls == []
+    with db.connect(cfg) as conn:
+        assert conn.execute('SELECT state FROM management_operations').fetchone()[0] == 'failed'
+
+
+def test_filer_write_accepts_current_approved_roots_and_replays(ledger):
+    cfg, manager = ledger
+    manager['permissions'] = {'file.manage': True, 'file.write_roots': ['/owned']}
+    with db.connect(cfg) as conn:
+        conn.execute("UPDATE management_connections SET permissions_json=? WHERE id='mg'", (json.dumps(manager['permissions']),))
+    calls = []
+    args = dict(settings=cfg, management=manager, actor_id='actor', action='file.mkdir', method='POST',
+                path='/file', payload={'path': '/owned', 'folder_name': 'new'}, idempotency_key='approved-file-root',
+                invoke=lambda: calls.append(True) or {'created': True}, readback=lambda: bool(calls),
+                verify=lambda before, after, response: before is False and after is True)
+    assert management_ops.perform_operation(**args)['status'] == 'confirmed'
+    replay = management_ops.perform_operation(**args)
+    assert replay['status'] == 'confirmed' and replay['replayed'] is True
+    assert len(calls) == 1
