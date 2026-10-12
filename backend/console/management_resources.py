@@ -514,7 +514,14 @@ def _created_user_matches(username: str, expected: Mapping[str, Any]) -> Callabl
         if not _user_fields_match(username, {field: expected[field] for field in ("email", "actions", "policy_names") if field in expected})(_before, after, response):
             return False
         if expected.get("generate_key"):
-            key_id = _access_key_id(response) if isinstance(response, Mapping) else None
+            if not isinstance(response, Mapping):
+                return False
+            created = response
+            if "user" in response:
+                created = response["user"]
+                if not isinstance(created, Mapping) or created.get("username") != username:
+                    return False
+            key_id = _access_key_id(created)
             return bool(key_id) and any(_access_key_id(key) == key_id for key in _extract_access_keys(after))
         return True
 
