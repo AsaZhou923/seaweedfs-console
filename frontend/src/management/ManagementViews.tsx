@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useRef, useState } from "react";
+import React, { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ResultSummary, StructuredResult } from "../components/ResultSummary";
 import { t, translateMessage, useLocale } from "../i18n";
 
@@ -66,7 +66,7 @@ export function ManagementConnectionSelector({ connections, value, onChange, onR
   );
 }
 
-export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string) => void }) {
+export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void }) {
   useLocale();
   const connection = connections.find((item) => item.id === managementId);
   if (!managementId) {
@@ -80,15 +80,16 @@ export function ManagementRoute({ route, request, managementId, connections, s3C
       </section>
     );
   }
-  if (route === "topology") return <TopologyPage request={request} managementId={managementId} />;
-  if (route === "storage") return <StoragePage request={request} managementId={managementId} connection={connection} />;
-  if (route === "buckets") return <BucketsPage request={request} managementId={managementId} connection={connection} />;
-  if (route === "files") return <FilesPage request={request} managementId={managementId} connection={connection} />;
-  if (route === "objects") return <ObjectsPage request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} />;
-  if (route === "iam") return <IamPage request={request} managementId={managementId} connection={connection} />;
-  if (route === "maintenance") return <MaintenancePage request={request} managementId={managementId} connection={connection} />;
-  if (route === "services") return <ServicesPage request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} />;
-  return <DashboardPage request={request} managementId={managementId} />;
+  // Forms, confirmations and one-time receipts belong to exactly one connection.
+  if (route === "topology") return <TopologyPage key={managementId} request={request} managementId={managementId} />;
+  if (route === "storage") return <StoragePage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "buckets") return <BucketsPage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "files") return <FilesPage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "objects") return <ObjectsPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} />;
+  if (route === "iam") return <IamPage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "maintenance") return <MaintenancePage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "services") return <ServicesPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} />;
+  return <DashboardPage key={managementId} request={request} managementId={managementId} />;
 }
 
 export function ManagementSettings({ request, s3Connections, managementConnections, refreshConnections }: { request: Requester; s3Connections: S3ConnectionOption[]; managementConnections: ManagementConnection[]; refreshConnections: () => Promise<void> }) {
@@ -105,8 +106,8 @@ export function ManagementSettings({ request, s3Connections, managementConnectio
     <div className="stack">
       <ConnectionSetup request={request} s3Connections={s3Connections} refreshConnections={refreshConnections} />
       <div><h2>{t("已配置 Management Connections")}</h2><ManagementConnectionTable items={managementConnections} selectedId={selected?.id || ""} onSelect={setSelectedId} /></div>
-      {selected && <AccessPolicyEditor request={request} connection={selected} refreshConnections={refreshConnections} />}
-      {selected && <OperationsHistory request={request} managementId={selected.id} />}
+      {selected && <AccessPolicyEditor key={selected.id} request={request} connection={selected} refreshConnections={refreshConnections} />}
+      {selected && <OperationsHistory key={selected.id} request={request} managementId={selected.id} />}
       <EvidenceDetails title={t("连接配置字段")} data={{ api: "/api/v1/management/connections", access_policy: "/api/v1/management/connections/{id}/access-policy", writes: "默认只读；开启 writes 必须提交 acknowledge_management_write=true，并由 permission flags/roots/prefixes 继续限权。", secret_policy: "admin_secret_ref is a server-side reference; plaintext credentials never render in the browser", endpoint_keys: ["master", "filer", "volume", "iceberg", "lance", "s3", "mq"] }} />
     </div>
   );
@@ -251,7 +252,11 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   const lifecycle = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const policy = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const createInvalid = createForm.advanced && createForm.set_default_retention && (!Number.isInteger(Number(createForm.object_lock_duration)) || Number(createForm.object_lock_duration) < 1);
-  useEffect(() => { setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false }); }, [managementId, selected]);
+  useEffect(() => {
+    setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false });
+    setSetting({ versioning: "Suspended", object_lock_configuration: "{\n  \"ObjectLockEnabled\": \"Enabled\"\n}", lifecycle: "{\n  \"rules\": []\n}", policy: "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": []\n}" });
+    setNotice({ error: "", result: null });
+  }, [managementId, selected]);
   async function bucketWrite(fn: () => Promise<unknown>) {
     const result = await run(setNotice, fn);
     if (result) setRefreshKey((value) => value + 1);
@@ -362,6 +367,22 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   const [renameForm, setRenameForm] = useState({ source_path: "", target_path: "" });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
+  const deletePreviewGeneration = useRef(0);
+  useLayoutEffect(() => {
+    deletePreviewGeneration.current += 1;
+    setDeleteForm({ path: "" });
+    setDeletePreview({ loading: false, error: "", data: null });
+    setRenameForm({ source_path: "", target_path: "" });
+    setUploadFile(null);
+    setFolderName("");
+    setNotice({ error: "", result: null });
+    return () => { deletePreviewGeneration.current += 1; };
+  }, [managementId, path]);
+  function selectDeleteTarget(next: { path: string; is_directory?: boolean }) {
+    deletePreviewGeneration.current += 1;
+    setDeleteForm(next);
+    setDeletePreview({ loading: false, error: "", data: null });
+  }
   const fileQuery = new URLSearchParams({ path, limit: "100" });
   if (cursor) fileQuery.set("cursor", cursor);
   const files = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/files?${fileQuery.toString()}`), [managementId, path, cursor, refreshKey]);
@@ -388,11 +409,14 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   async function loadDeletePreview() {
     const target = deleteForm.path.trim();
     if (!target) return;
+    const generation = ++deletePreviewGeneration.current;
     setDeletePreview({ loading: true, error: "", data: null });
     try {
       const data = await request<Record<string, unknown>>(`/management/${managementId}/files/delete-preview?path=${encodeURIComponent(target)}`);
+      if (generation !== deletePreviewGeneration.current) return;
       setDeletePreview({ loading: false, error: "", data });
     } catch (err) {
+      if (generation !== deletePreviewGeneration.current) return;
       setDeletePreview({ loading: false, error: String((err as Error).message || err), data: null });
     }
   }
@@ -412,7 +436,7 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
       <div className="managementGrid browseLayout">
         <DataPanel title={t("Raw Filer files")} loading={files.loading} error={files.error}>
           <label className="field">{t("路径")}<input value={path} onChange={(event) => { setCursor(""); setPath(event.target.value || "/"); }} /></label>
-          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("选择")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => { setDeleteForm({ path: child, is_directory: directory }); setDeletePreview({ loading: false, error: "", data: null }); }}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && <span className="hint">{t("S3 scoped APIs")}</span>}</div>]; })} />
+          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("选择")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => selectDeleteTarget({ path: child, is_directory: directory })}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && <span className="hint">{t("S3 scoped APIs")}</span>}</div>]; })} />
           {!entries.length && <StateRow label="Files" value={files.data ? t("空响应") : t("未知")} state={files.data ? "empty_response" : "unknown"} />}
           <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={nextCursor ? t("有下一页") : t("无下一页或未知")} />
         </DataPanel>
@@ -427,7 +451,7 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
             </section>
             <section className="formSection">
               <h3>{t("上传文件")}</h3><p className="hint">{t("The selected file is uploaded to the current path.")}</p>
-              <label className="field">{t("上传文件")}<input type="file" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>
+              <label className="field">{t("上传文件")}<input key={`${managementId}:${path}`} type="file" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>
               <div className="toolbar"><button type="button" disabled={!canFileWrite || !uploadFile || protectedFilePath(path)} onClick={() => fileWrite(upload)}>{t("上传到当前路径")}</button></div>
             </section>
             <section className="formSection">
@@ -437,7 +461,7 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
             </section>
             <section className="formSection">
               <h3>{t("删除路径")}</h3>
-              <label className="field">{t("删除路径")}<input value={deleteForm.path} onChange={(event) => { setDeleteForm({ path: event.target.value }); setDeletePreview({ loading: false, error: "", data: null }); }} placeholder={t("/safe/path/file-or-dir")} /></label>
+              <label className="field">{t("删除路径")}<input value={deleteForm.path} onChange={(event) => selectDeleteTarget({ path: event.target.value })} placeholder={t("/safe/path/file-or-dir")} /></label>
               <div className="toolbar"><button type="button" disabled={!deleteForm.path || protectedFilePath(deleteForm.path) || deletePreview.loading} onClick={loadDeletePreview}>{t("读取删除预览")}</button><button type="button" disabled={!canFileWrite || !deleteForm.path || protectedFilePath(deleteForm.path) || (deleteRequiresPreview() && !deletePreviewReady())} onClick={() => fileWrite(() => request(`/management/${managementId}/files/delete`, { method: "POST", body: JSON.stringify(deletePayload()) }))}>{t("确认删除")}</button></div>
               <DeletePreviewPanel preview={deletePreview} />
             </section>
@@ -472,7 +496,7 @@ function DeletePreviewPanel({ preview }: { preview: { loading: boolean; error: s
   );
 }
 
-function ObjectsPage({ request, managementId, connection, scopes, scopeId, setScopeId, onObjectSelected }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string) => void }) {
+function ObjectsPage({ request, managementId, connection, scopes, scopeId, setScopeId, onObjectSelected }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void }) {
   const associatedScopes = scopes.filter((scope) => connection?.s3_connection_id && scope.connection_id === connection.s3_connection_id);
   const selectedScope = associatedScopes.find((scope) => scope.id === scopeId);
   const selectedAnyScope = scopes.find((scope) => scope.id === scopeId);
@@ -481,7 +505,10 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   const [limit, setLimit] = useState("100");
   const [cursor, setCursor] = useState("");
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
-  const [selectedObject, setSelectedObject] = useState<Record<string, unknown> | null>(null);
+  const [selection, setSelection] = useState<{ context: string; object: Record<string, unknown> } | null>(null);
+  const selectionGeneration = useRef(0);
+  const selectionContext = JSON.stringify([managementId, scopeId, prefix, delimiter, limit, cursor, selectedScope?.authz_epoch]);
+  const selectedObject = selection?.context === selectionContext ? selection.object : null;
 
   useEffect(() => {
     if ((!scopeId || !associatedScopes.some((scope) => scope.id === scopeId)) && associatedScopes[0] && setScopeId) setScopeId(associatedScopes[0].id);
@@ -489,9 +516,16 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
 
   useEffect(() => {
     setCursor("");
-    setSelectedObject(null);
     setPrefix(selectedScope?.prefix || "");
   }, [selectedScope?.id]);
+
+  useLayoutEffect(() => {
+    selectionGeneration.current += 1;
+    setSelection(null);
+    setNotice({ error: "", result: null });
+    onObjectSelected?.(null);
+    return () => { selectionGeneration.current += 1; };
+  }, [selectionContext]);
 
   const query = new URLSearchParams({ scope_id: scopeId, prefix, delimiter, limit: String(Math.max(1, Math.min(1000, Number(limit) || 100))) });
   if (cursor) query.set("cursor", cursor);
@@ -502,11 +536,20 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   const mismatch = Boolean(scopeId && selectedAnyScope && !selectedScope);
 
   async function selectKey(key: string) {
-    const result = await request<Record<string, unknown>>(`/management/${managementId}/objects/select`, { method: "POST", body: JSON.stringify({ scope_id: scopeId, key }) });
-    const obj = record(result.object);
-    setSelectedObject(obj);
-    if (typeof obj.id === "string" && onObjectSelected) onObjectSelected(obj.id);
-    return result;
+    const generation = ++selectionGeneration.current;
+    onObjectSelected?.(null);
+    setSelection(null);
+    setNotice({ error: "", result: null });
+    try {
+      const result = await request<Record<string, unknown>>(`/management/${managementId}/objects/select`, { method: "POST", body: JSON.stringify({ scope_id: scopeId, key }) });
+      if (generation !== selectionGeneration.current) return;
+      const obj = record(result.object);
+      setSelection({ context: selectionContext, object: obj });
+      setNotice({ error: "", result });
+      if (typeof obj.id === "string" && onObjectSelected) onObjectSelected(obj.id);
+    } catch (err) {
+      if (generation === selectionGeneration.current) setNotice({ error: String((err as Error).message || err), result: null });
+    }
   }
 
   function downloadHref(item: Record<string, unknown>) {
@@ -533,7 +576,7 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
       </div>
       <DataPanel title={t("Folders / objects")} loading={objects.loading} error={objects.error}>
         {folders.length ? <DataTable caption="Live S3 prefixes" columns={["Folder", "Action"]} rows={folders.map((folder) => [<code>{folder}</code>, <button type="button" onClick={() => { setCursor(""); setPrefix(folder); }}>{t("打开")}</button>])} /> : null}
-        <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => run(setNotice, () => selectKey(String(item.key || "")))}>{t("查看详情")}</button><a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a></div>])} />
+        <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => { void selectKey(String(item.key || "")); }}>{t("查看详情")}</button><a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a></div>])} />
         {!items.length && <StateRow label="Objects" value={objects.data ? t("空响应") : t("未知")} state={objects.data ? "empty_response" : "unknown"} />}
         <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={t("Total: {count}", { count: objects.data?.total == null ? t("未知") : String(objects.data.total) })} />
       </DataPanel>
@@ -569,7 +612,7 @@ function ObjectVersionDeletePanel({ request, managementId, connection, scopeId, 
     setProbeIdempotencyKey("");
     setDeleteIntentDispatched(false);
     setNotice({ error: "", result: null });
-  }, [scopeId, object.key, object.version_id]);
+  }, [managementId, scopeId, object.key, object.version_id]);
 
   function updateTarget(next: Partial<{ key: string; version_id: string }>) {
     generation.current += 1;
@@ -1121,9 +1164,17 @@ function ResultPane({ error, result }: Notice) {
 }
 
 function useApi<T>(loader: () => Promise<T>, deps: React.DependencyList): AsyncState<T> {
-  const [state, setState] = useState<AsyncState<T>>({ loading: true, error: "", data: null });
-  useEffect(() => { let alive = true; setState((current) => ({ ...current, loading: true, error: "" })); loader().then((data) => { if (alive) setState({ loading: false, error: "", data }); }).catch((err) => { if (alive) setState({ loading: false, error: String((err as Error).message || err), data: null }); }); return () => { alive = false; }; }, deps);
-  return state;
+  const [state, setState] = useState<AsyncState<T> & { deps: React.DependencyList }>({ loading: true, error: "", data: null, deps });
+  useEffect(() => {
+    let alive = true;
+    setState({ loading: true, error: "", data: null, deps });
+    loader().then((data) => { if (alive) setState({ loading: false, error: "", data, deps }); })
+      .catch((err) => { if (alive) setState({ loading: false, error: String((err as Error).message || err), data: null, deps }); });
+    return () => { alive = false; };
+  }, deps);
+  // Do not expose old target data during the render before effect cleanup runs.
+  return deps.length === state.deps.length && deps.every((value, index) => Object.is(value, state.deps[index]))
+    ? state : { loading: true, error: "", data: null };
 }
 
 async function run(setNotice: (notice: Notice) => void, fn: () => Promise<unknown>) {
