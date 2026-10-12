@@ -959,6 +959,7 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
   const [capacity, setCapacity] = useState({ thresholds: '{"source_bytes":10737418240}' });
   const [trash, setTrash] = useState({ variant_id: "", reason: "manual review" });
   const token = useRef(0);
+  const selectionScope = useRef(scopeId);
   const scopeWritable = Boolean(scope?.writable);
   const scopeCanManageBucket = Boolean(scope?.manage_bucket);
 
@@ -988,15 +989,6 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
     if (!file) throw new Error("请选择要上传的 part 文件。");
     return request(`/scopes/${scopeId}/uploads/multipart/${encodeURIComponent(upload.uploadId)}/parts?part_number=${encodeURIComponent(partNumber)}`, { method: "POST", body: file });
   }
-
-  useEffect(() => {
-    if (sourceObjectIds.length) {
-      setCopyBatch((old) => ({ ...old, object_ids: sourceObjectIds.join("\n"), target_scope_id: old.target_scope_id || scopeId }));
-      setCopy((old) => ({ ...old, object_id: sourceObjectIds[0] }));
-      setObjectOps((old) => ({ ...old, object_id: sourceObjectIds[0] }));
-      setObjectVersions([]);
-    }
-  }, [sourceObjectIds, scopeId]);
 
   const copyBatchItems = useMemo(() => {
     const objectIds = lines(copyBatch.object_ids);
@@ -1040,6 +1032,18 @@ function Operations({ request, scopeId, scope, sourceObjectIds, initialTab }: { 
     setManifest((old) => ({ ...old, manifest_id: "" }));
     setTrash((old) => ({ ...old, variant_id: "" }));
   }, [scopeId]);
+
+  useEffect(() => {
+    const sameScope = selectionScope.current === scopeId;
+    selectionScope.current = scopeId;
+    // Import an intentional handoff after initial reset, never across Scopes.
+    if (sameScope && sourceObjectIds.length) {
+      setCopyBatch((old) => ({ ...old, object_ids: sourceObjectIds.join("\n"), target_scope_id: old.target_scope_id || scopeId }));
+      setCopy((old) => ({ ...old, object_id: sourceObjectIds[0] }));
+      setObjectOps((old) => ({ ...old, object_id: sourceObjectIds[0] }));
+      setObjectVersions([]);
+    }
+  }, [sourceObjectIds, scopeId]);
 
   return (
     <section className="panel imageWorkbench">
