@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import hashlib
@@ -669,6 +670,109 @@ def test_capacity_trends_orders_manual_snapshots_by_insert_when_observed_at_ties
     assert [item["id"] for item in trends["manual_snapshots"][:2]] == ["newer", "older"]
     assert trends["manual_snapshots"][0]["unknown_bytes"] == 5
     assert trends["manual_snapshots"][0]["unknown_fields"] == ["source_bytes", "temporary_bytes", "version_bytes"]
+
+
+@pytest.mark.parametrize("status", ["active", "initializing", "completing", "completed", "aborted", "failed", "abort_failed", "needs_review"])
+def test_multipart_part_only_dispatches_for_active_upload(settings, monkeypatch, status):
+    setup_variant(settings)
+    with db.connect(settings) as conn:
+        scope = core.ensure_scope_permission(conn, "s", "object:write")
+        upload = enhancements.start_multipart_upload(
+            conn, enhancement_api.S3EnhancementAdapter(FakeS3()),
+            scope_id="s", bucket="bucket", key="inactive-upload.bin",
+        )
+        conn.execute("UPDATE multipart_uploads SET status=? WHERE id=?", (status, upload["id"]))
+
+    class RecordingAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def upload_part(self, *args):
+            self.calls.append(args)
+            return {"ETag": '"synthetic-part"'}
+
+    adapter = RecordingAdapter()
+
+    async def stream():
+        yield b"synthetic-part-bytes"
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), stream=stream)
+    monkeypatch.setattr(enhancement_api, "mutation", lambda request: SimpleNamespace(id="admin"))
+    monkeypatch.setattr(enhancement_api, "_require_scope", lambda *args, **kwargs: scope)
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda *args: adapter)
+
+    if status == "active":
+        result = asyncio.run(enhancement_api.multipart_part(request, "s", upload["id"], 1))
+        assert result == {"ETag": '"synthetic-part"'}
+        assert adapter.calls == [("bucket", "inactive-upload.bin", upload["upload_id"], 1, b"synthetic-part-bytes")]
+        return
+
+    with pytest.raises(AppError) as exc:
+        asyncio.run(enhancement_api.multipart_part(request, "s", upload["id"], 1))
+
+    assert exc.value.status == 409
+    assert adapter.calls == []
+    with db.connect(settings) as conn:
+        assert enhancements.get_multipart_upload(conn, upload["id"])["status"] == status
+
+
+
+def test_multipart_part_rechecks_upload_state_after_stream(settings, monkeypatch):
+    setup_variant(settings)
+    with db.connect(settings) as conn:
+        upload = enhancements.start_multipart_upload(conn, enhancement_api.S3EnhancementAdapter(FakeS3()),
+                                                     scope_id='s', bucket='bucket', key='part.bin')
+    calls = []
+
+    def require_scope(request, scope_id, **kwargs):
+        with db.connect(settings) as conn:
+            return core.ensure_scope_permission(conn, scope_id, 'object:write')
+
+    async def stream():
+        with db.connect(settings) as conn:
+            conn.execute("UPDATE multipart_uploads SET status='aborted' WHERE id=?", (upload['id'],))
+        yield b'bytes'
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), stream=stream)
+    monkeypatch.setattr(enhancement_api, 'mutation', lambda request: SimpleNamespace(id='admin'))
+    monkeypatch.setattr(enhancement_api, '_require_scope', require_scope)
+    monkeypatch.setattr(enhancement_api, '_adapter_for_scope', lambda *args: calls.append(args))
+    with pytest.raises(AppError) as error:
+        asyncio.run(enhancement_api.multipart_part(request, 's', upload['id'], 1))
+    assert error.value.code == 'UPLOAD_NOT_ACTIVE'
+    assert calls == []
+
+
+@pytest.mark.parametrize('change', ['archive', 'readonly', 'epoch'])
+def test_multipart_part_revalidates_authorization_and_upload_after_stream(settings, monkeypatch, change):
+    setup_variant(settings)
+    with db.connect(settings) as conn:
+        upload = enhancements.start_multipart_upload(conn, enhancement_api.S3EnhancementAdapter(FakeS3()),
+                                                     scope_id='s', bucket='bucket', key='part.bin')
+    calls = []
+
+    def require_scope(request, scope_id, **kwargs):
+        with db.connect(settings) as conn:
+            return core.ensure_scope_permission(conn, scope_id, 'object:write')
+
+    async def stream():
+        with db.connect(settings) as conn:
+            if change == 'archive':
+                core.archive_scope(conn, 's')
+            elif change == 'readonly':
+                conn.execute("UPDATE scopes SET writable=0 WHERE id='s'")
+            elif change == 'epoch':
+                conn.execute("UPDATE scopes SET authz_epoch=authz_epoch+1 WHERE id='s'")
+        yield b'bytes'
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), stream=stream)
+    monkeypatch.setattr(enhancement_api, 'mutation', lambda request: SimpleNamespace(id='admin'))
+    monkeypatch.setattr(enhancement_api, '_require_scope', require_scope)
+    monkeypatch.setattr(enhancement_api, '_adapter_for_scope', lambda *args: calls.append(args))
+    with pytest.raises(AppError) as error:
+        asyncio.run(enhancement_api.multipart_part(request, 's', upload['id'], 1))
+    assert error.value.code == 'FORBIDDEN_SCOPE'
+    assert calls == []
 
 
 def test_manifest_connection_identity_must_match_authoritative_scope(settings):

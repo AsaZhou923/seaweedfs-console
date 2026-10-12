@@ -1,6 +1,10 @@
 type Message = { en: string; "zh-CN": string };
 
 export const apiMessages: Record<string, Message> = {
+  "Multipart upload is not active.": { en: "Multipart upload is not active.", "zh-CN": "分段上传当前不是活动状态。" },
+  "Scope prefix must be a string.": { en: "Scope prefix must be a string.", "zh-CN": "Scope 前缀必须是字符串。" },
+  "Scope policy must be an object.": { en: "Scope policy must be an object.", "zh-CN": "Scope 策略必须是对象。" },
+  "{field} must be a boolean.": { en: "{field} must be a boolean.", "zh-CN": "{field} 必须是布尔值。" },
   "Manifest entry connection does not belong to this Scope.": { en: "Manifest entry connection does not belong to this Scope.", "zh-CN": "引用清单条目的连接不属于当前 Scope。" },
   "manifest entry connection does not match manifest scope": { en: "manifest entry connection does not match manifest scope", "zh-CN": "引用清单条目的连接与清单 Scope 不一致。" },
   "Admin client cannot fetch worker preview HTML": { en: "Admin client cannot fetch worker preview HTML", "zh-CN": "Admin 客户端无法获取 worker 预览 HTML。" },
