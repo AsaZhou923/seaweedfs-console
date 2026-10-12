@@ -71,6 +71,26 @@ def _write_guard(connection, action, payload):
         prefixes = permissions.get("bucket_write_prefixes", [])
         if not isinstance(bucket, str) or not isinstance(prefixes, list) or not any(isinstance(prefix, str) and prefix and bucket.startswith(prefix) for prefix in prefixes):
             raise AppError("MANAGEMENT_BUCKET_FORBIDDEN", "桶不在此管理连接批准的写入范围内", 403)
+    if action.startswith("file."):
+        # Recheck target boundaries against the latest policy, including after
+        # the remote before-snapshot. Route-level checks use an older snapshot.
+        from .management_native import _canonical_path, _require_write_root
+        if action in {"file.mkdir", "file.upload"}:
+            name = payload.get("folder_name" if action == "file.mkdir" else "filename")
+            parent = payload.get("path")
+            if not isinstance(parent, str) or not isinstance(name, str) or not name or "/" in name or "\\" in name or name in {".", ".."}:
+                raise AppError("INVALID_PATH", "file target is invalid.", 422)
+            paths = [parent.rstrip("/") + "/" + name]
+        elif action == "file.rename":
+            paths = [payload.get("source_path"), payload.get("target_path")]
+        elif action == "file.delete":
+            paths = [payload.get("path")]
+        else:
+            raise AppError("MANAGEMENT_PATH_FORBIDDEN", "file action has no approved target contract.", 403)
+        for path in paths:
+            if not isinstance(path, str):
+                raise AppError("INVALID_PATH", "file target must be a path string.", 422)
+            _require_write_root(connection, _canonical_path(path, allow_root=False))
 
 
 def perform_operation(settings, management, actor_id, action, method, path, payload,

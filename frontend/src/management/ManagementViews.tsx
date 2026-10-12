@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useRef, useState } from "react";
+import React, { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ResultSummary, StructuredResult } from "../components/ResultSummary";
 import { t, translateMessage, useLocale } from "../i18n";
 
@@ -66,7 +66,7 @@ export function ManagementConnectionSelector({ connections, value, onChange, onR
   );
 }
 
-export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string) => void }) {
+export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void }) {
   useLocale();
   const connection = connections.find((item) => item.id === managementId);
   if (!managementId) {
@@ -80,15 +80,16 @@ export function ManagementRoute({ route, request, managementId, connections, s3C
       </section>
     );
   }
-  if (route === "topology") return <TopologyPage request={request} managementId={managementId} />;
-  if (route === "storage") return <StoragePage request={request} managementId={managementId} connection={connection} />;
-  if (route === "buckets") return <BucketsPage request={request} managementId={managementId} connection={connection} />;
-  if (route === "files") return <FilesPage request={request} managementId={managementId} connection={connection} />;
-  if (route === "objects") return <ObjectsPage request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} />;
-  if (route === "iam") return <IamPage request={request} managementId={managementId} connection={connection} />;
-  if (route === "maintenance") return <MaintenancePage request={request} managementId={managementId} connection={connection} />;
-  if (route === "services") return <ServicesPage request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} />;
-  return <DashboardPage request={request} managementId={managementId} />;
+  // Forms, confirmations and one-time receipts belong to exactly one connection.
+  if (route === "topology") return <TopologyPage key={managementId} request={request} managementId={managementId} />;
+  if (route === "storage") return <StoragePage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "buckets") return <BucketsPage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "files") return <FilesPage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "objects") return <ObjectsPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} />;
+  if (route === "iam") return <IamPage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "maintenance") return <MaintenancePage key={managementId} request={request} managementId={managementId} connection={connection} />;
+  if (route === "services") return <ServicesPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} />;
+  return <DashboardPage key={managementId} request={request} managementId={managementId} />;
 }
 
 export function ManagementSettings({ request, s3Connections, managementConnections, refreshConnections }: { request: Requester; s3Connections: S3ConnectionOption[]; managementConnections: ManagementConnection[]; refreshConnections: () => Promise<void> }) {
@@ -105,8 +106,8 @@ export function ManagementSettings({ request, s3Connections, managementConnectio
     <div className="stack">
       <ConnectionSetup request={request} s3Connections={s3Connections} refreshConnections={refreshConnections} />
       <div><h2>{t("已配置 Management Connections")}</h2><ManagementConnectionTable items={managementConnections} selectedId={selected?.id || ""} onSelect={setSelectedId} /></div>
-      {selected && <AccessPolicyEditor request={request} connection={selected} refreshConnections={refreshConnections} />}
-      {selected && <OperationsHistory request={request} managementId={selected.id} />}
+      {selected && <AccessPolicyEditor key={selected.id} request={request} connection={selected} refreshConnections={refreshConnections} />}
+      {selected && <OperationsHistory key={selected.id} request={request} managementId={selected.id} />}
       <EvidenceDetails title={t("连接配置字段")} data={{ api: "/api/v1/management/connections", access_policy: "/api/v1/management/connections/{id}/access-policy", writes: "默认只读；开启 writes 必须提交 acknowledge_management_write=true，并由 permission flags/roots/prefixes 继续限权。", secret_policy: "admin_secret_ref is a server-side reference; plaintext credentials never render in the browser", endpoint_keys: ["master", "filer", "volume", "iceberg", "lance", "s3", "mq"] }} />
     </div>
   );
@@ -251,7 +252,11 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   const lifecycle = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const policy = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const createInvalid = createForm.advanced && createForm.set_default_retention && (!Number.isInteger(Number(createForm.object_lock_duration)) || Number(createForm.object_lock_duration) < 1);
-  useEffect(() => { setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false }); }, [managementId, selected]);
+  useEffect(() => {
+    setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false });
+    setSetting({ versioning: "Suspended", object_lock_configuration: "{\n  \"ObjectLockEnabled\": \"Enabled\"\n}", lifecycle: "{\n  \"rules\": []\n}", policy: "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": []\n}" });
+    setNotice({ error: "", result: null });
+  }, [managementId, selected]);
   async function bucketWrite(fn: () => Promise<unknown>) {
     const result = await run(setNotice, fn);
     if (result) setRefreshKey((value) => value + 1);
@@ -362,6 +367,22 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   const [renameForm, setRenameForm] = useState({ source_path: "", target_path: "" });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
+  const deletePreviewGeneration = useRef(0);
+  useLayoutEffect(() => {
+    deletePreviewGeneration.current += 1;
+    setDeleteForm({ path: "" });
+    setDeletePreview({ loading: false, error: "", data: null });
+    setRenameForm({ source_path: "", target_path: "" });
+    setUploadFile(null);
+    setFolderName("");
+    setNotice({ error: "", result: null });
+    return () => { deletePreviewGeneration.current += 1; };
+  }, [managementId, path]);
+  function selectDeleteTarget(next: { path: string; is_directory?: boolean }) {
+    deletePreviewGeneration.current += 1;
+    setDeleteForm(next);
+    setDeletePreview({ loading: false, error: "", data: null });
+  }
   const fileQuery = new URLSearchParams({ path, limit: "100" });
   if (cursor) fileQuery.set("cursor", cursor);
   const files = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/files?${fileQuery.toString()}`), [managementId, path, cursor, refreshKey]);
@@ -388,11 +409,14 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   async function loadDeletePreview() {
     const target = deleteForm.path.trim();
     if (!target) return;
+    const generation = ++deletePreviewGeneration.current;
     setDeletePreview({ loading: true, error: "", data: null });
     try {
       const data = await request<Record<string, unknown>>(`/management/${managementId}/files/delete-preview?path=${encodeURIComponent(target)}`);
+      if (generation !== deletePreviewGeneration.current) return;
       setDeletePreview({ loading: false, error: "", data });
     } catch (err) {
+      if (generation !== deletePreviewGeneration.current) return;
       setDeletePreview({ loading: false, error: String((err as Error).message || err), data: null });
     }
   }
@@ -412,7 +436,7 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
       <div className="managementGrid browseLayout">
         <DataPanel title={t("Raw Filer files")} loading={files.loading} error={files.error}>
           <label className="field">{t("路径")}<input value={path} onChange={(event) => { setCursor(""); setPath(event.target.value || "/"); }} /></label>
-          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("选择")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => { setDeleteForm({ path: child, is_directory: directory }); setDeletePreview({ loading: false, error: "", data: null }); }}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && <span className="hint">{t("S3 scoped APIs")}</span>}</div>]; })} />
+          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("选择")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => selectDeleteTarget({ path: child, is_directory: directory })}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && <span className="hint">{t("S3 scoped APIs")}</span>}</div>]; })} />
           {!entries.length && <StateRow label="Files" value={files.data ? t("空响应") : t("未知")} state={files.data ? "empty_response" : "unknown"} />}
           <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={nextCursor ? t("有下一页") : t("无下一页或未知")} />
         </DataPanel>
@@ -427,7 +451,7 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
             </section>
             <section className="formSection">
               <h3>{t("上传文件")}</h3><p className="hint">{t("The selected file is uploaded to the current path.")}</p>
-              <label className="field">{t("上传文件")}<input type="file" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>
+              <label className="field">{t("上传文件")}<input key={`${managementId}:${path}`} type="file" onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label>
               <div className="toolbar"><button type="button" disabled={!canFileWrite || !uploadFile || protectedFilePath(path)} onClick={() => fileWrite(upload)}>{t("上传到当前路径")}</button></div>
             </section>
             <section className="formSection">
@@ -437,7 +461,7 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
             </section>
             <section className="formSection">
               <h3>{t("删除路径")}</h3>
-              <label className="field">{t("删除路径")}<input value={deleteForm.path} onChange={(event) => { setDeleteForm({ path: event.target.value }); setDeletePreview({ loading: false, error: "", data: null }); }} placeholder={t("/safe/path/file-or-dir")} /></label>
+              <label className="field">{t("删除路径")}<input value={deleteForm.path} onChange={(event) => selectDeleteTarget({ path: event.target.value })} placeholder={t("/safe/path/file-or-dir")} /></label>
               <div className="toolbar"><button type="button" disabled={!deleteForm.path || protectedFilePath(deleteForm.path) || deletePreview.loading} onClick={loadDeletePreview}>{t("读取删除预览")}</button><button type="button" disabled={!canFileWrite || !deleteForm.path || protectedFilePath(deleteForm.path) || (deleteRequiresPreview() && !deletePreviewReady())} onClick={() => fileWrite(() => request(`/management/${managementId}/files/delete`, { method: "POST", body: JSON.stringify(deletePayload()) }))}>{t("确认删除")}</button></div>
               <DeletePreviewPanel preview={deletePreview} />
             </section>
@@ -472,7 +496,7 @@ function DeletePreviewPanel({ preview }: { preview: { loading: boolean; error: s
   );
 }
 
-function ObjectsPage({ request, managementId, connection, scopes, scopeId, setScopeId, onObjectSelected }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string) => void }) {
+function ObjectsPage({ request, managementId, connection, scopes, scopeId, setScopeId, onObjectSelected }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void }) {
   const associatedScopes = scopes.filter((scope) => connection?.s3_connection_id && scope.connection_id === connection.s3_connection_id);
   const selectedScope = associatedScopes.find((scope) => scope.id === scopeId);
   const selectedAnyScope = scopes.find((scope) => scope.id === scopeId);
@@ -481,7 +505,10 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   const [limit, setLimit] = useState("100");
   const [cursor, setCursor] = useState("");
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
-  const [selectedObject, setSelectedObject] = useState<Record<string, unknown> | null>(null);
+  const [selection, setSelection] = useState<{ context: string; object: Record<string, unknown> } | null>(null);
+  const selectionGeneration = useRef(0);
+  const selectionContext = JSON.stringify([managementId, scopeId, prefix, delimiter, limit, cursor, selectedScope?.authz_epoch]);
+  const selectedObject = selection?.context === selectionContext ? selection.object : null;
 
   useEffect(() => {
     if ((!scopeId || !associatedScopes.some((scope) => scope.id === scopeId)) && associatedScopes[0] && setScopeId) setScopeId(associatedScopes[0].id);
@@ -489,9 +516,16 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
 
   useEffect(() => {
     setCursor("");
-    setSelectedObject(null);
     setPrefix(selectedScope?.prefix || "");
   }, [selectedScope?.id]);
+
+  useLayoutEffect(() => {
+    selectionGeneration.current += 1;
+    setSelection(null);
+    setNotice({ error: "", result: null });
+    onObjectSelected?.(null);
+    return () => { selectionGeneration.current += 1; };
+  }, [selectionContext]);
 
   const query = new URLSearchParams({ scope_id: scopeId, prefix, delimiter, limit: String(Math.max(1, Math.min(1000, Number(limit) || 100))) });
   if (cursor) query.set("cursor", cursor);
@@ -502,11 +536,20 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   const mismatch = Boolean(scopeId && selectedAnyScope && !selectedScope);
 
   async function selectKey(key: string) {
-    const result = await request<Record<string, unknown>>(`/management/${managementId}/objects/select`, { method: "POST", body: JSON.stringify({ scope_id: scopeId, key }) });
-    const obj = record(result.object);
-    setSelectedObject(obj);
-    if (typeof obj.id === "string" && onObjectSelected) onObjectSelected(obj.id);
-    return result;
+    const generation = ++selectionGeneration.current;
+    onObjectSelected?.(null);
+    setSelection(null);
+    setNotice({ error: "", result: null });
+    try {
+      const result = await request<Record<string, unknown>>(`/management/${managementId}/objects/select`, { method: "POST", body: JSON.stringify({ scope_id: scopeId, key }) });
+      if (generation !== selectionGeneration.current) return;
+      const obj = record(result.object);
+      setSelection({ context: selectionContext, object: obj });
+      setNotice({ error: "", result });
+      if (typeof obj.id === "string" && onObjectSelected) onObjectSelected(obj.id);
+    } catch (err) {
+      if (generation === selectionGeneration.current) setNotice({ error: String((err as Error).message || err), result: null });
+    }
   }
 
   function downloadHref(item: Record<string, unknown>) {
@@ -533,7 +576,7 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
       </div>
       <DataPanel title={t("Folders / objects")} loading={objects.loading} error={objects.error}>
         {folders.length ? <DataTable caption="Live S3 prefixes" columns={["Folder", "Action"]} rows={folders.map((folder) => [<code>{folder}</code>, <button type="button" onClick={() => { setCursor(""); setPrefix(folder); }}>{t("打开")}</button>])} /> : null}
-        <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => run(setNotice, () => selectKey(String(item.key || "")))}>{t("查看详情")}</button><a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a></div>])} />
+        <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => { void selectKey(String(item.key || "")); }}>{t("查看详情")}</button><a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a></div>])} />
         {!items.length && <StateRow label="Objects" value={objects.data ? t("空响应") : t("未知")} state={objects.data ? "empty_response" : "unknown"} />}
         <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={t("Total: {count}", { count: objects.data?.total == null ? t("未知") : String(objects.data.total) })} />
       </DataPanel>
@@ -569,7 +612,7 @@ function ObjectVersionDeletePanel({ request, managementId, connection, scopeId, 
     setProbeIdempotencyKey("");
     setDeleteIntentDispatched(false);
     setNotice({ error: "", result: null });
-  }, [scopeId, object.key, object.version_id]);
+  }, [managementId, scopeId, object.key, object.version_id]);
 
   function updateTarget(next: Partial<{ key: string; version_id: string }>) {
     generation.current += 1;
@@ -643,12 +686,18 @@ function ObjectVersionDeletePanel({ request, managementId, connection, scopeId, 
   return <div className="panel inlinePanel"><h2>{t("固定版本删除")}</h2><p className="hint">{t("先读取真实 version-info；空 Version 输入会采用本次响应的真实版本身份，显式输入则必须逐字匹配。失败或 unknown 不会自动换幂等 key 重试。")}</p><div className="miniGrid"><label className="field">{t("Key")}<input value={target.key} onChange={(event) => updateTarget({ key: event.target.value })} /></label><label className="field">{t("Version ID（可选）")}<input value={target.version_id} onChange={(event) => updateTarget({ version_id: event.target.value })} placeholder={t("留空查询当前/未版本化身份")} /></label></div><div className="toolbar"><button type="button" disabled={!scopeId || !target.key || info.loading} onClick={readVersionInfo}>{t("读取版本身份")}</button><button type="button" disabled={!canProbe || probe.loading} title={canProbe ? t("会在当前可写 Scope 前缀下创建并清理 .console-probe 临时对象") : t("需要 object.manage 与 scope writable")} onClick={checkConditionalDelete}>{t("探测条件删除能力")}</button><StatusBadge state={can(connection, "object.manage") ? "reported" : "permission_denied"} label={can(connection, "object.manage") ? "object.manage" : "object.manage off"} /><StatusBadge state={scope?.writable ? "reported" : "permission_denied"} label={scope?.writable ? "scope writable" : "scope readonly"} /></div>{info.error && <div className="notice error">{info.error}</div>}{probe.error && <div className="notice error">{probe.error}</div>}<div className="stateList"><StateRow label="Version identity" value={displayValue(identity.identity_strength)} state={identity.can_delete === true ? "confirmed" : identity.identity_strength ? "needs_review" : "unknown"} /><StateRow label="Can delete" value={yesNoUnknown(identity.can_delete)} state={identity.can_delete === true ? "confirmed" : identity.can_delete === false ? "needs_review" : "unknown"} /><StateRow label="Delete block reason" value={displayValue(identity.delete_block_reason)} state={identity.delete_block_reason ? "needs_review" : "unknown"} /><StateRow label="Version ID" value={versionIdentityLabel(identity.version_id)} state={identity.version_id !== undefined ? "reported" : "unknown"} /><StateRow label="ETag" value={displayValue(identity.etag)} state={identity.etag ? "reported" : "unknown"} /><StateRow label="Size" value={formatBytesOrUnknown(identity.size)} state={identity.size == null ? "unknown" : "reported"} /><StateRow label="Legal hold" value={displayValue(identity.legal_hold)} state={identity.legal_hold === "ON" ? "needs_review" : identity.legal_hold ? "reported" : "unknown"} /><StateRow label="Retention until" value={displayValue(identity.retention_until)} state={identity.retention_until ? "needs_review" : "unknown"} /><StateRow label="Delete Idempotency-Key" value={idempotencyKey ? deleteIntentDispatched ? t("已派发并冻结") : t("已固定") : t("读取身份后生成")} state={idempotencyKey ? "confirmed" : "unknown"} /><StateRow label="Probe capability" value={displayValue(probeData.capability_status || probeData.status)} state={probeData.status === "confirmed" || probeData.capability_status === "supported" ? "confirmed" : probeData.status === "needs_review" ? "needs_review" : "unknown"} /><StateRow label="Probe Idempotency-Key" value={probeIdempotencyKey ? t("已固定") : t("未探测")} state={probeIdempotencyKey ? "confirmed" : "unknown"} /></div><label className="ack"><input type="checkbox" checked={confirmDelete} onChange={(event) => setConfirmDelete(event.target.checked)} />{" "}{t("我确认永久删除此 key/version/ETag 对应的对象版本")}</label><label className="ack"><input type="checkbox" checked={ackReferences} onChange={(event) => setAckReferences(event.target.checked)} />{" "}{t("我确认外部引用状态未知，删除后需人工承担引用影响")}</label><button type="button" disabled={!canDelete} title={canDelete ? t("提交固定版本删除") : t("需要 object.manage、scope writable、can_delete=true、ETag、两个确认和固定 Idempotency-Key")} onClick={deleteVersion}>{t("永久删除此版本")}</button><ResultPane error={notice.error} result={notice.result} /><EvidenceDetails title={t("version-info / probe DTO")} data={{ version_info: info.data || { state: "unknown" }, conditional_delete_probe: probe.data || { state: "unknown" } }} /></div>;
 }
 
-function IamPage({ request, managementId, connection }: { request: Requester; managementId: string; connection?: ManagementConnection }) {
-  const users = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/users`), [managementId]);
-  const groups = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/groups`), [managementId]);
-  const serviceAccounts = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/service-accounts`), [managementId]);
-  const policies = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/policies`), [managementId]);
-  const principals = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/principals`), [managementId]);
+function IamPage({ request: apiRequest, managementId, connection }: { request: Requester; managementId: string; connection?: ManagementConnection }) {
+  const [refreshKey, setRefreshKey] = useState(0);
+  async function request<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+    const result = await apiRequest<T>(path, init);
+    if (init?.method && init.method !== "GET" && !path.endsWith("/validate")) setRefreshKey((value) => value + 1);
+    return result;
+  }
+  const users = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/users`), [managementId, refreshKey]);
+  const groups = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/groups`), [managementId, refreshKey]);
+  const serviceAccounts = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/service-accounts`), [managementId, refreshKey]);
+  const policies = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/policies`), [managementId, refreshKey]);
+  const principals = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/iam/principals`), [managementId, refreshKey]);
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
   const [userForm, setUserForm] = useState({ username: "", email: "", actions: "", policy_names: "", generate_key: false, access_key_id: "", access_key_status: "Active" });
   const [groupForm, setGroupForm] = useState({ name: "", username: "", policy_name: "", status: "enabled" });
@@ -664,7 +713,7 @@ function IamPage({ request, managementId, connection }: { request: Requester; ma
     <section className="managementPage">
       <div className="managementGrid twoColumn">
         <DataPanel title={t("Users / Access Keys")} loading={users.loading} error={users.error}>
-          <DataTable caption="S3 IAM users" columns={["User", "Email", "Access IDs", "Groups", "Source"]} rows={userRows.map((item) => [displayValue(item.username), displayValue(item.email), array(item.access_keys).map((key) => displayValue(record(key).access_key)).join(", ") || "未知", array(item.groups).join(", ") || "未知", displayValue(item.is_static ? "static" : users.data?.source || "dynamic_api")])} />
+          <DataTable caption="S3 IAM users" columns={["User", "Email", "Access IDs", "Groups", "Source"]} rows={userRows.map((item) => [displayValue(item.username), displayValue(item.email), array(item.access_keys).map((key) => displayValue(record(key).access_key)).join(", ") || t("未知"), array(item.groups).join(", ") || t("未知"), displayValue(item.is_static ? "static" : users.data?.source || "dynamic_api")])} />
           {!userRows.length && <StateRow label="Dynamic users" value={users.data ? t("空响应；静态 S3 配置覆盖未知") : t("未知")} state={users.data ? "empty_response" : "unknown"} />}
         </DataPanel>
         <div className="panel inlinePanel"><h2>{t("User CRUD / key rotation")}</h2><label className="field">{t("Username")}<input value={userForm.username} onChange={(event) => setUserForm({ ...userForm, username: event.target.value })} /></label><label className="field">{t("Email")}<input value={userForm.email} onChange={(event) => setUserForm({ ...userForm, email: event.target.value })} /></label><label className="field">{t("Actions")}<textarea value={userForm.actions} onChange={(event) => setUserForm({ ...userForm, actions: event.target.value })} placeholder={t("每行一个 action")} /></label><label className="field">{t("Policies")}<input value={userForm.policy_names} onChange={(event) => setUserForm({ ...userForm, policy_names: event.target.value })} placeholder={t("comma or newline separated")} /></label><label className="ack"><input type="checkbox" checked={userForm.generate_key} onChange={(event) => setUserForm({ ...userForm, generate_key: event.target.checked })} />{" "}{t("创建时由后端生成一次性 secret")}</label><div className="toolbar"><button type="button" disabled={!canWrite || !userForm.username} onClick={() => run(setNotice, () => request(`/management/${managementId}/iam/users`, { method: "POST", body: JSON.stringify(userPayload(userForm)) }))}>{t("创建用户")}</button><button type="button" disabled={!canWrite || !userForm.username} onClick={() => run(setNotice, () => request(`/management/${managementId}/iam/users/${encodeURIComponent(userForm.username)}`, { method: "PUT", body: JSON.stringify(userPayload(userForm)) }))}>{t("更新用户")}</button><button type="button" disabled={!canWrite || !userForm.username} onClick={() => run(setNotice, () => request(`/management/${managementId}/iam/users/${encodeURIComponent(userForm.username)}`, { method: "DELETE" }))}>{t("删除用户")}</button><button type="button" disabled={!canWrite || !userForm.username} onClick={() => run(setNotice, () => request(`/management/${managementId}/iam/users/${encodeURIComponent(userForm.username)}/access-keys`, { method: "POST", body: "{}" }))}>{t("创建 access key")}</button></div><div className="miniGrid"><label className="field">{t("Access key ID")}<input value={userForm.access_key_id} onChange={(event) => setUserForm({ ...userForm, access_key_id: event.target.value })} /></label><label className="field">{t("Status")}<select value={userForm.access_key_status} onChange={(event) => setUserForm({ ...userForm, access_key_status: event.target.value })}><option value="Active">{t("Active")}</option><option value="Inactive">{t("Inactive")}</option></select></label></div><div className="toolbar"><button type="button" disabled={!canWrite || !userForm.username || !userForm.access_key_id} onClick={() => run(setNotice, () => request(`/management/${managementId}/iam/users/${encodeURIComponent(userForm.username)}/access-keys/${encodeURIComponent(userForm.access_key_id)}/status`, { method: "PUT", body: JSON.stringify({ status: userForm.access_key_status }) }))}>{t("更新 key 状态")}</button><button type="button" disabled={!canWrite || !userForm.username || !userForm.access_key_id} onClick={() => run(setNotice, () => request(`/management/${managementId}/iam/users/${encodeURIComponent(userForm.username)}/access-keys/${encodeURIComponent(userForm.access_key_id)}`, { method: "DELETE" }))}>{t("删除 key")}</button></div><p className="hint">{t("secret 只允许后端生成并在创建响应中出现一次；列表永不展示 secret。")}</p></div>
@@ -726,6 +775,27 @@ function MaintenancePage({ request, managementId, connection }: { request: Reque
   const [jobDetail, setJobDetail] = useState<AsyncState<Record<string, unknown>>>({ loading: false, error: "", data: null });
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
   const [form, setForm] = useState({ action: "detect", job_type: "", job_id: "", params: "{}" });
+  const jobTypeGeneration = useRef(0);
+  const jobGeneration = useRef(0);
+  const currentTargets = useRef({ jobType: form.job_type, jobId: form.job_id });
+  currentTargets.current = { jobType: form.job_type, jobId: form.job_id };
+  const [loadedJobType, setLoadedJobType] = useState("");
+  useLayoutEffect(() => {
+    jobTypeGeneration.current += 1;
+    setJobTypeDetail({ loading: false, error: "", data: null });
+    setLoadedJobType("");
+    setForm((old) => ({ ...old, params: "{}" }));
+    setNotice({ error: "", result: null });
+    return () => { jobTypeGeneration.current += 1; };
+  }, [managementId, form.job_type]);
+  useLayoutEffect(() => {
+    jobGeneration.current += 1;
+    setJobDetail({ loading: false, error: "", data: null });
+    setForm((old) => ({ ...old, params: "{}" }));
+    setNotice({ error: "", result: null });
+    return () => { jobGeneration.current += 1; };
+  }, [managementId, form.job_id]);
+  const configMatchesTarget = Boolean(form.job_type && loadedJobType === form.job_type);
   const canExecute = can(connection, "maintenance.execute");
   const status = record(maintenance.data?.status);
   const workers = record(maintenance.data?.workers);
@@ -737,30 +807,45 @@ function MaintenancePage({ request, managementId, connection }: { request: Reque
   const selectedJobType = jobTypeRows.find((item) => String(item.job_type ?? item.type ?? item.name ?? "") === form.job_type);
   const runRows = jobTypeRunRows(jobTypeDetail.data);
   async function maintenanceWrite() {
-    const result = await run(setNotice, () => request(`/management/${managementId}/maintenance/actions`, { method: "POST", body: JSON.stringify(maintenancePayload(form)) }));
+    const typeGeneration = jobTypeGeneration.current;
+    const idGeneration = jobGeneration.current;
+    const result = await run((notice) => {
+      if (typeGeneration === jobTypeGeneration.current && idGeneration === jobGeneration.current) setNotice(notice);
+    }, () => request(`/management/${managementId}/maintenance/actions`, { method: "POST", body: JSON.stringify(maintenancePayload(form)) }));
     if (result) setRefreshKey((value) => value + 1);
   }
   async function loadJobTypeDetail() {
     if (!form.job_type) return;
+    const generation = ++jobTypeGeneration.current;
+    const jobType = form.job_type;
+    setLoadedJobType("");
     setJobTypeDetail({ loading: true, error: "", data: null });
     try {
       const data = await request<Record<string, unknown>>(`/management/${managementId}/maintenance/job-types/${encodeURIComponent(form.job_type)}`);
+      if (generation !== jobTypeGeneration.current || currentTargets.current.jobType !== jobType) return;
+      setLoadedJobType(jobType);
       setJobTypeDetail({ loading: false, error: "", data });
     } catch (err) {
+      if (generation !== jobTypeGeneration.current || currentTargets.current.jobType !== jobType) return;
       setJobTypeDetail({ loading: false, error: String((err as Error).message || err), data: null });
     }
   }
   function loadCurrentConfigIntoEditor() {
+    if (!configMatchesTarget || record(jobTypeDetail.data?.config).status !== "supported") return;
     const config = record(record(jobTypeDetail.data?.config).data);
     setForm((value) => ({ ...value, action: "config_update", params: JSON.stringify(config, null, 2) }));
   }
   async function loadJobDetail() {
     if (!form.job_id) return;
+    const generation = ++jobGeneration.current;
+    const jobId = form.job_id;
     setJobDetail({ loading: true, error: "", data: null });
     try {
       const data = await request<Record<string, unknown>>(`/management/${managementId}/maintenance/jobs/${encodeURIComponent(form.job_id)}`);
+      if (generation !== jobGeneration.current || currentTargets.current.jobId !== jobId) return;
       setJobDetail({ loading: false, error: "", data });
     } catch (err) {
+      if (generation !== jobGeneration.current || currentTargets.current.jobId !== jobId) return;
       setJobDetail({ loading: false, error: String((err as Error).message || err), data: null });
     }
   }
@@ -768,7 +853,7 @@ function MaintenancePage({ request, managementId, connection }: { request: Reque
     <section className="managementPage">
       <div className="managementGrid twoColumn">
         <DataPanel title={t("Worker / Plugin")} loading={maintenance.loading} error={maintenance.error}><div className="stateList"><StateRow label="Plugin configured" value={yesNoUnknown(record(status.data).configured)} state={record(status.data).configured === true ? "reported" : "not_configured"} /><StateRow label="Plugin enabled" value={yesNoUnknown(record(status.data).enabled)} state={record(status.data).enabled === true ? "reported" : "not_configured"} /><StateRow label="Worker count" value={displayValue(record(status.data).worker_count)} state={record(status.data).worker_count == null ? "unknown" : "reported"} /><StateRow label="Source" value="official_admin_plugin_api" state="reported" /></div></DataPanel>
-        <div className="panel inlinePanel"><h2>{t("维护动作")}</h2><p className="hint">{t("detect/run/job execute/expire 只有后端显式授权并写入 operation journal 后才可触发；状态以 receipt 和历史为准。")}</p><div className="miniGrid"><label className="field">{t("Action")}<select value={form.action} onChange={(event) => setForm({ ...form, action: event.target.value })}><option value="detect">{t("detect")}</option><option value="run">{t("run")}</option><option value="config_update">{t("config_update")}</option><option value="job_expire">{t("job_expire")}</option><option value="job_execute">{t("job_execute")}</option></select></label><label className="field">{t("Job type")}<input value={form.job_type} onChange={(event) => setForm({ ...form, job_type: event.target.value })} /></label><label className="field">{t("Job ID")}<input value={form.job_id} onChange={(event) => setForm({ ...form, job_id: event.target.value })} /></label></div><label className="field">{form.action === "config_update" ? "Config JSON" : form.action === "job_execute" ? "Job JSON" : "Params JSON"}<textarea value={form.params} onChange={(event) => setForm({ ...form, params: event.target.value })} /></label><div className="stateList"><StateRow label="Job type registry" value={selectedJobType ? t("已由上游 registry 报告") : form.job_type ? t("未在当前 registry 中找到") : t("未选择")} state={selectedJobType ? "reported" : "unknown"} /><StateRow label="Current config" value={displayValue(record(jobTypeDetail.data?.config).status || (jobTypeDetail.loading ? t("读取中") : t("未读取")))} state={record(jobTypeDetail.data?.config).status === "supported" ? "reported" : jobTypeDetail.error ? "error" : "unknown"} /></div><div className="toolbar"><button type="button" onClick={() => setRefreshKey((value) => value + 1)}>{t("刷新维护证据")}</button><button type="button" disabled={!form.job_type || jobTypeDetail.loading} onClick={loadJobTypeDetail}>{t("读取 JobType 详情")}</button><button type="button" disabled={!form.job_id || jobDetail.loading} onClick={loadJobDetail}>{t("读取 Job ID 详情")}</button><button type="button" disabled={record(jobTypeDetail.data?.config).status !== "supported"} onClick={loadCurrentConfigIntoEditor}>{t("载入 Config 编辑")}</button><button type="button" disabled={!canExecute} title={canExecute ? "提交维护动作" : disabledTitle("maintenance.execute")} onClick={maintenanceWrite}>{t("提交维护动作")}</button></div>{jobTypeDetail.error && <div className="notice error">{jobTypeDetail.error}</div>}<StateRow label="远端授权" value={canExecute ? t("已授权") : t("未授权，动作禁用")} state={canExecute ? "reported" : "permission_denied"} /><EvidenceDetails title={t("选中 Job type 编辑前证据")} data={{ registry: selectedJobType || { state: "unknown", job_type: form.job_type || null, source: "maintenance.job_types" }, detail: jobTypeDetail.data || { state: jobTypeDetail.loading ? "loading" : "unknown" } }} /></div>
+        <div className="panel inlinePanel"><h2>{t("维护动作")}</h2><p className="hint">{t("detect/run/job execute/expire 只有后端显式授权并写入 operation journal 后才可触发；状态以 receipt 和历史为准。")}</p><div className="miniGrid"><label className="field">{t("Action")}<select value={form.action} onChange={(event) => setForm({ ...form, action: event.target.value })}><option value="detect">{t("detect")}</option><option value="run">{t("run")}</option><option value="config_update">{t("config_update")}</option><option value="job_expire">{t("job_expire")}</option><option value="job_execute">{t("job_execute")}</option></select></label><label className="field">{t("Job type")}<input value={form.job_type} onChange={(event) => setForm({ ...form, job_type: event.target.value })} /></label><label className="field">{t("Job ID")}<input value={form.job_id} onChange={(event) => setForm({ ...form, job_id: event.target.value })} /></label></div><label className="field">{form.action === "config_update" ? "Config JSON" : form.action === "job_execute" ? "Job JSON" : "Params JSON"}<textarea value={form.params} onChange={(event) => setForm({ ...form, params: event.target.value })} /></label><div className="stateList"><StateRow label="Job type registry" value={selectedJobType ? t("已由上游 registry 报告") : form.job_type ? t("未在当前 registry 中找到") : t("未选择")} state={selectedJobType ? "reported" : "unknown"} /><StateRow label="Current config" value={displayValue(record(jobTypeDetail.data?.config).status || (jobTypeDetail.loading ? t("读取中") : t("未读取")))} state={record(jobTypeDetail.data?.config).status === "supported" ? "reported" : jobTypeDetail.error ? "error" : "unknown"} /></div><div className="toolbar"><button type="button" onClick={() => setRefreshKey((value) => value + 1)}>{t("刷新维护证据")}</button><button type="button" disabled={!form.job_type || jobTypeDetail.loading} onClick={loadJobTypeDetail}>{t("读取 JobType 详情")}</button><button type="button" disabled={!form.job_id || jobDetail.loading} onClick={loadJobDetail}>{t("读取 Job ID 详情")}</button><button type="button" disabled={!configMatchesTarget || record(jobTypeDetail.data?.config).status !== "supported"} onClick={loadCurrentConfigIntoEditor}>{t("载入 Config 编辑")}</button><button type="button" disabled={!canExecute} title={canExecute ? "提交维护动作" : disabledTitle("maintenance.execute")} onClick={maintenanceWrite}>{t("提交维护动作")}</button></div>{jobTypeDetail.error && <div className="notice error">{jobTypeDetail.error}</div>}<StateRow label="远端授权" value={canExecute ? t("已授权") : t("未授权，动作禁用")} state={canExecute ? "reported" : "permission_denied"} /><EvidenceDetails title={t("选中 Job type 编辑前证据")} data={{ registry: selectedJobType || { state: "unknown", job_type: form.job_type || null, source: "maintenance.job_types" }, detail: jobTypeDetail.data || { state: jobTypeDetail.loading ? "loading" : "unknown" } }} /></div>
       </div>
       <div className="managementGrid threeColumn"><DataPanel title={t("Workers")} loading={maintenance.loading} error={maintenance.error}><DataTable caption="Official plugin workers" columns={["Worker", "Version", "Last seen"]} rows={workerRows.map((item) => [displayValue(item.WorkerID ?? item.worker_id), displayValue(item.WorkerVersion ?? item.version), displayValue(item.LastSeenAt ?? item.last_seen_at)])} /></DataPanel><DataPanel title={t("Job types")} loading={maintenance.loading} error={maintenance.error}><DataTable caption="Official plugin job types" columns={["Type", "Detect", "Run"]} rows={jobTypeRows.map((item) => [displayValue(item.job_type ?? item.type ?? item.name), yesNoUnknown(item.can_detect), yesNoUnknown(item.can_execute)])} /></DataPanel><DataPanel title={t("Activities")} loading={maintenance.loading} error={maintenance.error}><DataTable caption="Official plugin activities" columns={["Stage", "Message", "At"]} rows={activityRows.slice(0, 20).map((item) => [displayValue(item.stage), displayValue(item.message), displayValue(item.occurred_at)])} /></DataPanel></div>
       <div className="managementGrid twoColumn"><DataPanel title={t("JobType 运行历史")} loading={jobTypeDetail.loading} error={jobTypeDetail.error}><DataTable caption="Official plugin job type runs" columns={["Job", "State", "Started", "Updated", "Source"]} rows={runRows.map((item) => [displayValue(item.job_id ?? item.id), displayValue(item.state ?? item.status), displayValue(item.started_at ?? item.created_at), displayValue(item.updated_at ?? item.completed_at), displayValue(item.source ?? record(jobTypeDetail.data?.runs).source)])} />{!runRows.length && <StateRow label="Runs" value={jobTypeDetail.data ? t("空响应或 upstream 未提供 runs") : t("未知")} state={jobTypeDetail.data ? "empty_response" : "unknown"} />}</DataPanel><DataPanel title={t("Job ID 详情")} loading={jobDetail.loading} error={jobDetail.error}><JobDetailPanel data={jobDetail.data} /></DataPanel></div>
@@ -1121,9 +1206,17 @@ function ResultPane({ error, result }: Notice) {
 }
 
 function useApi<T>(loader: () => Promise<T>, deps: React.DependencyList): AsyncState<T> {
-  const [state, setState] = useState<AsyncState<T>>({ loading: true, error: "", data: null });
-  useEffect(() => { let alive = true; setState((current) => ({ ...current, loading: true, error: "" })); loader().then((data) => { if (alive) setState({ loading: false, error: "", data }); }).catch((err) => { if (alive) setState({ loading: false, error: String((err as Error).message || err), data: null }); }); return () => { alive = false; }; }, deps);
-  return state;
+  const [state, setState] = useState<AsyncState<T> & { deps: React.DependencyList }>({ loading: true, error: "", data: null, deps });
+  useEffect(() => {
+    let alive = true;
+    setState({ loading: true, error: "", data: null, deps });
+    loader().then((data) => { if (alive) setState({ loading: false, error: "", data, deps }); })
+      .catch((err) => { if (alive) setState({ loading: false, error: String((err as Error).message || err), data: null, deps }); });
+    return () => { alive = false; };
+  }, deps);
+  // Do not expose old target data during the render before effect cleanup runs.
+  return deps.length === state.deps.length && deps.every((value, index) => Object.is(value, state.deps[index]))
+    ? state : { loading: true, error: "", data: null };
 }
 
 async function run(setNotice: (notice: Notice) => void, fn: () => Promise<unknown>) {
