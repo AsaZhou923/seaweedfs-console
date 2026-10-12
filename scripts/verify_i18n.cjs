@@ -131,6 +131,8 @@ async function main() {
       for (const [english, chinese] of scopeValidationMessages) {
         assert.equal(i18n.translateMessage(`INVALID_REQUEST: ${english}`), `INVALID_REQUEST: ${locale === 'en' ? english : chinese}`);
       }
+      assert.equal(i18n.translateMessage("INVALID_REQUEST: Manifest entry connection does not belong to this Scope."), locale === 'en' ? "INVALID_REQUEST: Manifest entry connection does not belong to this Scope." : "INVALID_REQUEST: 引用清单条目的连接不属于当前 Scope。");
+      assert.equal(i18n.translateMessage("INVALID_REQUEST: manifest entry connection does not match manifest scope"), locale === 'en' ? "INVALID_REQUEST: manifest entry connection does not match manifest scope" : "INVALID_REQUEST: 引用清单条目的连接与清单 Scope 不一致。");
       for (const [name, Component, props] of cases) {
         assert.equal(typeof Component, 'function', `Missing test component ${name}`);
         const html = renderToStaticMarkup(React.createElement(Component, props));

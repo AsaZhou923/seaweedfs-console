@@ -342,6 +342,8 @@ def _assert_head_matches_indexed_object(scope: Mapping[str, Any], obj: Mapping[s
 
 def _validate_manifest_entries(conn, scope: Mapping[str, Any], entries: list[Mapping[str, Any]]) -> None:
     for entry in entries:
+        if entry.get("connection_id") and entry["connection_id"] != scope["connection_id"]:
+            raise AppError("MANIFEST_SCOPE_MISMATCH", "Manifest entry connection does not belong to this Scope.", 422)
         if entry.get("bucket") and entry["bucket"] != scope["bucket"]:
             raise AppError("MANIFEST_SCOPE_MISMATCH", "manifest entry bucket 不属于当前 scope。", 422)
         if entry.get("key"):

@@ -773,3 +773,18 @@ def test_multipart_part_revalidates_authorization_and_upload_after_stream(settin
         asyncio.run(enhancement_api.multipart_part(request, 's', upload['id'], 1))
     assert error.value.code == 'FORBIDDEN_SCOPE'
     assert calls == []
+
+
+def test_manifest_connection_identity_must_match_authoritative_scope(settings):
+    setup_variant(settings)
+    entry = {'connection_id': 'foreign-connection', 'key': 'in.jpg', 'entity_type': 'p', 'entity_id': '1', 'role': 'primary'}
+    with db.connect(settings) as conn:
+        scope = core.ensure_scope_permission(conn, 's', 'object:read')
+        with pytest.raises(AppError) as error:
+            enhancement_api._validate_manifest_entries(conn, scope, [entry])
+        assert error.value.status == 422
+        enhancements.initialize(conn)
+        manifest = enhancements.start_reference_manifest(conn, scope_id='s', schema_version=1, coverage={'scope_id': 's', 'bucket': 'bucket', 'prefix': ''}, declared_count=1, waterline='2026-10-10T00:00:00Z')
+        with pytest.raises(enhancements.ValidationError):
+            enhancements.import_reference_manifest_entries(conn, manifest_id=manifest['id'], entries=[entry])
+        assert conn.execute('SELECT count(*) FROM reference_manifest_entries').fetchone()[0] == 0
