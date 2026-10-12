@@ -492,7 +492,19 @@ def _deleted(_before: Any, after: Any, _response: Any) -> bool:
 
 def _user_fields_match(username: str, expected: Mapping[str, Any]) -> Callable[[Any, Any, Any], bool]:
     def verify(_before: Any, after: Any, _response: Any) -> bool:
-        return isinstance(after, Mapping) and after.get("username") == username and all(after.get(field) == value for field, value in expected.items())
+        if not isinstance(after, Mapping) or after.get("username") != username:
+            return False
+        for field, value in expected.items():
+            if field not in after:
+                return False
+            actual = after[field]
+            # OSS 4.48 serializes empty Go slices as null. Only normalize an
+            # explicitly present, known list field to the requested empty list.
+            if field in {"actions", "policy_names"} and isinstance(value, list) and not value and actual is None:
+                actual = []
+            if actual != value:
+                return False
+        return True
 
     return verify
 
@@ -502,7 +514,14 @@ def _created_user_matches(username: str, expected: Mapping[str, Any]) -> Callabl
         if not _user_fields_match(username, {field: expected[field] for field in ("email", "actions", "policy_names") if field in expected})(_before, after, response):
             return False
         if expected.get("generate_key"):
-            key_id = _access_key_id(response) if isinstance(response, Mapping) else None
+            if not isinstance(response, Mapping):
+                return False
+            created = response
+            if "user" in response:
+                created = response["user"]
+                if not isinstance(created, Mapping) or created.get("username") != username:
+                    return False
+            key_id = _access_key_id(created)
             return bool(key_id) and any(_access_key_id(key) == key_id for key in _extract_access_keys(after))
         return True
 
@@ -599,12 +618,40 @@ def _omits_item(expected: str, *fields: str) -> Callable[[Any, Any, Any], bool]:
     return lambda _before, after, _response: _collection_absent(after, expected, *fields)
 
 
+def _policy_comparison_document(document: Any) -> Any:
+    """Normalize only IAM action/resource scalar-or-list fields for readback.
+
+    OSS 4.48 emits singleton arrays as strings for these standard fields.
+    Preserve every other value, including conditions and arbitrary arrays.
+    """
+    if not isinstance(document, Mapping):
+        return document
+    result = dict(document)
+    statements = result.get("Statement")
+    if not isinstance(statements, list):
+        return result
+    normalized = []
+    for statement in statements:
+        if not isinstance(statement, Mapping):
+            normalized.append(statement)
+            continue
+        item = dict(statement)
+        for field in ("Action", "NotAction", "Resource", "NotResource"):
+            if isinstance(item.get(field), str):
+                item[field] = [item[field]]
+        normalized.append(item)
+    result["Statement"] = normalized
+    return result
+
+
 def _policy_document_match(name: str, document: Mapping[str, Any]) -> Callable[[Any, Any, Any], bool]:
+    expected = _policy_comparison_document(document)
+
     def verify(_before: Any, after: Any, _response: Any) -> bool:
         if not isinstance(after, Mapping) or after.get("name") != name:
             return False
         actual = after.get("document") or after.get("policy") or after.get("Document") or after.get("Policy")
-        return actual == dict(document)
+        return _policy_comparison_document(actual) == expected
 
     return verify
 
@@ -693,13 +740,13 @@ def _normalize_lifecycle_config(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _bucket_policy_match(policy: Mapping[str, Any]) -> Callable[[Any, Any, Any], bool]:
-    expected = dict(policy)
+    expected = _policy_comparison_document(policy)
 
     def verify(_before: Any, after: Any, _response: Any) -> bool:
         if not isinstance(after, Mapping):
             return False
         actual = after.get("policy") or after.get("Policy") or after
-        return actual == expected
+        return _policy_comparison_document(actual) == expected
 
     return verify
 
@@ -1021,8 +1068,13 @@ def create_bucket(request: Request, management_id: str, body: dict[str, Any]):
 @router.delete("/{management_id}/buckets/{bucket}")
 def delete_bucket(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    _ensure_empty_bucket_for_delete(request, mgmt, bucket)
     s3 = _associated_s3(request, mgmt)
+    def invoke():
+        # Replay a persisted receipt before consulting a bucket that the first
+        # attempt may already have deleted.
+        _ensure_empty_bucket_for_delete(request, mgmt, bucket)
+        return s3.delete_bucket(Bucket=bucket)
+
     try:
         return _mutate(
             request,
@@ -1031,7 +1083,7 @@ def delete_bucket(request: Request, management_id: str, bucket: str):
             method="DELETE",
             path=f"/s3/buckets/{_q(bucket)}",
             payload={"bucket": bucket},
-            invoke=lambda: s3.delete_bucket(Bucket=bucket),
+            invoke=invoke,
             readback=_s3_bucket_readback(s3, bucket),
             verify=_deleted,
         )
@@ -1061,7 +1113,7 @@ def get_bucket_versioning(request: Request, management_id: str, bucket: str):
 def update_bucket_versioning(request: Request, management_id: str, bucket: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     status = body.get("status")
-    if status not in {"Enabled", "Suspended"}:
+    if not isinstance(status, str) or status not in {"Enabled", "Suspended"}:
         raise AppError("INVALID_VERSIONING_STATUS", "status must be Enabled or Suspended", 422)
     s3 = _associated_s3(request, mgmt)
     payload = {"bucket": bucket, "versioning_configuration": {"Status": status}}
@@ -1218,14 +1270,12 @@ def create_user(request: Request, management_id: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     _reject_manual_secret(body)
     payload = {
-        "username": body.get("username"),
+        "username": _required_string(body, "username", code="INVALID_USERNAME"),
         "email": _optional_string(body, "email", ""),
         "actions": _string_list(body, "actions"),
         "generate_key": _optional_bool(body, "generate_key", False),
         "policy_names": _string_list(body, "policy_names"),
     }
-    if not payload["username"]:
-        raise AppError("INVALID_USERNAME", "username is required", 422)
     readback_path = f"/api/users/{_q(payload['username'])}"
     return _mutate(request, mgmt, action="iam.manage", method="POST", path="/api/users", payload=payload, readback=lambda: _admin_read_json_or_none(request.app.state.settings, mgmt, readback_path), verify=_created_user_matches(str(payload["username"]), payload), return_created_secret=payload["generate_key"])
 
@@ -1264,7 +1314,7 @@ def delete_access_key(request: Request, management_id: str, username: str, acces
 def update_access_key_status(request: Request, management_id: str, username: str, access_key_id: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     status = body.get("status")
-    if status not in {"Active", "Inactive"}:
+    if not isinstance(status, str) or status not in {"Active", "Inactive"}:
         raise AppError("INVALID_ACCESS_KEY_STATUS", "status must be Active or Inactive", 422)
     return _mutate(request, mgmt, action="iam.manage", method="PUT", path=f"/api/users/{_q(username)}/access-keys/{_q(access_key_id)}/status", payload={"status": status}, readback_path=f"/api/users/{_q(username)}", verify=_access_key_status(username, access_key_id, status))
 
@@ -1386,7 +1436,7 @@ def delete_group(request: Request, management_id: str, name: str):
 def set_group_status(request: Request, management_id: str, name: str, body: dict[str, Any]):
     mgmt = _require_management(request, management_id, write=True)
     status = body.get("status")
-    if status not in {"enabled", "disabled"}:
+    if not isinstance(status, str) or status not in {"enabled", "disabled"}:
         raise AppError("INVALID_GROUP_STATUS", "status must be enabled or disabled", 422)
     return _mutate(request, mgmt, action="iam.manage", method="PUT", path=f"/api/groups/{_q(name)}/status", payload={"enabled": status == "enabled"}, readback_path=f"/api/groups/{_q(name)}", verify=_group_status(name, status))
 
