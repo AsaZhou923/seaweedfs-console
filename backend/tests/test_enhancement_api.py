@@ -833,3 +833,42 @@ def test_derived_worker_rechecks_changed_output_scope_prefix_before_storage(sett
     assert storage_calls == []
     with db.connect(settings) as conn:
         assert conn.execute("SELECT COUNT(*) FROM operation_intents WHERE operation_type='derived.put'").fetchone()[0] == 0
+
+
+def test_metadata_copy_rejects_source_change_after_initial_head(settings, monkeypatch):
+    setup_variant(settings)
+
+    class RacingS3(FakeS3):
+        source_heads = 0
+
+        def head_object(self, Bucket, Key, **kwargs):
+            head = super().head_object(Bucket, Key, **kwargs)
+            if Key == "in.jpg":
+                self.source_heads += 1
+                if self.source_heads == 1:
+                    self.objects[(Bucket, Key)].update(
+                        Body=b"changed", ETag='"changed"', ContentLength=7,
+                        ChecksumSHA256=hashlib.sha256(b"changed").hexdigest(),
+                    )
+            return head
+
+    fake = RacingS3()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), headers={})
+    monkeypatch.setattr(enhancement_api, "mutation", lambda request: SimpleNamespace(id="admin"))
+
+    def require_scope(request, scope_id, **kwargs):
+        with db.connect(settings) as conn:
+            return core.ensure_scope_permission(conn, scope_id, "object:write")
+
+    def require_object(request, scope_id, object_id):
+        with db.connect(settings) as conn:
+            return core.get_object(conn, scope_id, object_id)
+
+    monkeypatch.setattr(enhancement_api, "_require_scope", require_scope)
+    monkeypatch.setattr(core, "require_object", require_object)
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda *args: enhancement_api.S3EnhancementAdapter(fake))
+    with pytest.raises(AppError) as error:
+        enhancement_api.put_metadata(request, "s", "o", {"target_key": "copy.jpg", "metadata": {"label": "test"}})
+    assert error.value.status == 409
+    assert fake.puts == 0
+    assert ("bucket", "copy.jpg") not in fake.objects
