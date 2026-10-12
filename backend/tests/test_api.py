@@ -383,6 +383,51 @@ def test_connection_create_rejects_secret_without_approved_endpoint(tmp_path: Pa
         assert client.get("/api/v1/connections").json()["items"] == []
 
 
+@pytest.mark.parametrize('username,password', [('admin', None), ('admin', {}), ('admin', []), ({}, 'pass'), (None, 'pass'), (7, 'pass')])
+def test_login_rejects_malformed_credentials_without_session(api, username, password):
+    client, app, _ = api
+    response = client.post('/api/v1/auth/login', json={'username': username, 'password': password}, headers={'Origin': 'http://testserver'})
+    assert response.status_code == 401
+    assert response.json()['error']['code'] == 'UNAUTHENTICATED'
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute('SELECT count(*) FROM sessions').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('change', [
+    {'writable': 'false'}, {'writable': 1}, {'manage_bucket': 'false'}, {'manage_bucket': None},
+    {'overlap_ack': 'false'}, {'scope_policy': None}, {'scope_policy': []},
+    {'scope_policy': {'allow_preview': 'false'}}, {'scope_policy': {'allow_original_download': 1}},
+    {'prefix': None}, {'prefix': []}, {'prefix': 123},
+])
+def test_scope_creation_rejects_malformed_privileges_and_prefix(api, change):
+    client, app, _ = api
+    csrf = login(client)
+    connection, project, scope = create_scope(client, csrf)
+    body = {'connection_id': connection, 'display_name': 'malformed scope', 'bucket': 'images', 'prefix': 'separate/', **change}
+    response = client.post(f'/api/v1/projects/{project}/scopes', json=body, headers=authed_headers(csrf))
+    assert response.status_code == 422
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute('SELECT count(*) FROM scopes').fetchone()[0] == 1
+
+
+def test_scope_jobs_are_filtered_before_limit(api):
+    client, app, _ = api
+    csrf = login(client)
+    _, _, scope_a = create_scope(client, csrf, 'gallery/')
+    _, _, scope_b = create_scope(client, csrf, 'other/')
+    with db.connect(app.state.settings) as conn:
+        wanted = jobs.submit_job(conn, scope_a, 'scan', {'authz_epoch': 1})
+        conn.execute("UPDATE jobs SET created_at='2026-01-01T00:00:00Z' WHERE id=?", (wanted['id'],))
+        for _ in range(201):
+            jobs.submit_job(conn, scope_b, 'checksum', {'authz_epoch': 1})
+        # The previous global-limit-then-filter query loses this older Scope job.
+        prior_rows = conn.execute('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 200').fetchall()
+        assert not [row for row in prior_rows if row['scope_id'] == scope_a]
+    response = client.get('/api/v1/jobs', params={'scope_id': scope_a})
+    assert response.status_code == 200
+    assert [item['id'] for item in response.json()['items']] == [wanted['id']]
+
+
 def test_job_controls_with_real_session_and_repeated_requests(api):
     client, app, _fake = api
     csrf = login(client)

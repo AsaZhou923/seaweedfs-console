@@ -177,7 +177,11 @@ def list_jobs(request: Request, scope_id: str | None = None):
     from .security import current_user
     current_user(request)
     with db.connect(request.app.state.settings) as conn:
-        rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 200").fetchall()
+        if scope_id:
+            core.require_scope(request, scope_id)
+            rows = conn.execute("SELECT * FROM jobs WHERE scope_id=? ORDER BY created_at DESC, id DESC LIMIT 200", (scope_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT 200").fetchall()
         visible = []
         for row in rows:
             if scope_id and scope_id != row["scope_id"]:

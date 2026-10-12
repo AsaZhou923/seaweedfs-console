@@ -681,3 +681,33 @@ def test_run_job_processes_one_immutable_variant_with_checkpoint(conn):
     assert [checkpoint["phase"] for checkpoint in checkpoints] == ["intent_persisted", "completed"]
     variant = enh.get_derived_variant(conn, result["checkpoint"]["variant_id"])
     assert adapter.objects[("b", variant["output_key"], "put-v1")]["metadata"]["swc-variant-id"] == variant["id"]
+
+
+def test_multipart_abort_can_retry_after_transient_remote_failure(conn):
+    class RecoveringAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.abort_calls = 0
+
+        def abort_multipart_upload(self, bucket, key, upload_id):
+            self.abort_calls += 1
+            if self.abort_calls == 1:
+                raise TimeoutError("synthetic abort timeout")
+            super().abort_multipart_upload(bucket, key, upload_id)
+
+    adapter = RecoveringAdapter()
+    upload = enh.start_multipart_upload(conn, adapter, scope_id="s1", bucket="b", key="retry-abort")
+
+    failed = enh.abort_multipart_upload(conn, adapter, upload_row_id=upload["id"])
+    assert failed["status"] == "abort_failed"
+    assert failed["aborted_at"] is None
+    assert upload["upload_id"] in adapter.multipart
+
+    recovered = enh.abort_multipart_upload(conn, adapter, upload_row_id=upload["id"])
+    assert recovered["status"] == "aborted"
+    assert recovered["error"] is None
+    assert recovered["aborted_at"]
+    assert enh.abort_multipart_upload(conn, adapter, upload_row_id=upload["id"])["status"] == "aborted"
+    assert adapter.abort_calls == 2
+    assert upload["upload_id"] not in adapter.multipart
+    assert enh.get_multipart_upload(conn, upload["id"])["status"] == "aborted"
