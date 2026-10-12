@@ -1127,20 +1127,22 @@ def complete_multipart_upload(
 def abort_multipart_upload(conn: sqlite3.Connection, adapter: Any, *, upload_row_id: str) -> dict[str, Any]:
     initialize(conn)
     upload = get_multipart_upload(conn, upload_row_id)
-    if upload["status"] not in {"active", "initializing", "failed", "needs_review"}:
+    if upload["status"] == "aborted":
+        return upload
+    if upload["status"] not in {"active", "initializing", "failed", "needs_review", "abort_failed"}:
         raise ConflictError("multipart upload cannot be aborted in its current state")
     try:
         if upload["upload_id"]:
             _call_required(adapter, "abort_multipart_upload", upload["bucket"], upload["key"], upload["upload_id"])
         status = "aborted"
-        error = upload["error"]
+        error = None
     except Exception as exc:
         status = "abort_failed"
         error = str(exc)
     with _transaction(conn):
         conn.execute(
             "UPDATE multipart_uploads SET status=?, aborted_at=?, error=?, updated_at=? WHERE id=?",
-            (status, utc_now(), error, utc_now(), upload_row_id),
+            (status, utc_now() if status == "aborted" else None, error, utc_now(), upload_row_id),
         )
     return get_multipart_upload(conn, upload_row_id)
 
@@ -1164,6 +1166,11 @@ def copy_object_safely(
         observed_revision = make_observed_revision(source_bucket, source_key, source_head, source_version_id)
         if observed_revision != expected_source_revision:
             raise ConflictError("source object revision does not match selected index revision")
+    source_etag = _get_attr(source_head, "etag")
+    conditional_read = getattr(adapter, "get_object_bytes_if_match", None)
+    if not isinstance(source_etag, str) or not source_etag or not callable(conditional_read):
+        raise CapabilityUnsupported("safe copy requires an ETag and conditional source-read adapter support")
+    bound_version = source_version_id if source_version_id is not None else _get_attr(source_head, "version_id")
     with _transaction(conn):
         intent_id, _ = _operation_intent(
             conn,
@@ -1175,8 +1182,8 @@ def copy_object_safely(
             },
         )
     try:
-        data = _call_required(adapter, "get_object_bytes", source_bucket, source_key, source_version_id)
-        fresh_source = _call_required(adapter, "head_object", source_bucket, source_key, source_version_id)
+        data = conditional_read(source_bucket, source_key, bound_version, source_etag)
+        fresh_source = _call_required(adapter, "head_object", source_bucket, source_key, bound_version)
         _verify_copy_result(source_head, fresh_source)
         content_type = _get_attr(source_head, "content_type") or "application/octet-stream"
         merged_metadata = dict(_get_attr(source_head, "metadata") or {})
@@ -1605,7 +1612,9 @@ def _normalize_reference_manifest_entry(
         normalized["bucket"] = bucket
     elif normalized.get("bucket") is None and scope_identity.get("bucket"):
         normalized["bucket"] = scope_identity["bucket"]
-    if scope_identity.get("connection_id") and not normalized.get("connection_id"):
+    if scope_identity.get("connection_id"):
+        if normalized.get("connection_id") and normalized["connection_id"] != scope_identity["connection_id"]:
+            raise ValidationError("manifest entry connection does not match manifest scope")
         normalized["connection_id"] = scope_identity["connection_id"]
     return normalized
 
@@ -2111,4 +2120,3 @@ except Exception:  # pragma: no cover - exercised implicitly when FastAPI is abs
     router = None
 else:
     router = APIRouter()
-
