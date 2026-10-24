@@ -447,6 +447,34 @@ def test_derived_variant_batch_replay_resumes_legacy_planning_batch(settings, mo
     assert all(item["job_id"] and item["variant_id"] for item in batch["items"])
 
 
+def test_derived_variant_batch_resume_keeps_persisted_plan_and_queued_jobs(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    # Written by the old code: output_prefix "batch" was normalized to "batch/".
+    body = {"object_ids": ["o"], "preset_ids": preset_ids[:1], "output_prefix": "batch"}
+    with db.connect(settings) as conn:
+        now = jobs.now()
+        revision = conn.execute("SELECT revision FROM objects WHERE id='o'").fetchone()[0]
+        stored = [{"object_id": "o", "source_revision": revision, "preset_id": preset_ids[0], "preset_version": 1, "output_scope_id": "s", "output_key": "batch/legacy.webp", "state": "planned"}]
+        conn.execute(
+            "INSERT INTO derived_variant_batches(id,scope_id,project_id,request_hash,idempotency_key,status,planned_count,items_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("batch_legacy", "s", "p", enhancements.sha256_text(enhancements.canonical_json(body)), "batch-key", "planning", 1, json.dumps(stored), now, now),
+        )
+        # The interrupted attempt had already committed this pair's variant and job.
+        variant_id = enhancements.plan_derived_variant(
+            conn, project_id="p", scope_id="s", source_object_id="o", source_revision=revision, preset_id=preset_ids[0],
+            output_scope_id="s", output_bucket="bucket", output_key="batch/legacy.webp", actor_id="admin",
+        )
+        earlier_job = jobs.submit_job(conn, "s", "derived_variant", {"variant_id": variant_id, "source_revision": revision}, actor="admin", idempotency_key=f"batch_legacy:o:{preset_ids[0]}", effect_class="remote_mutating")
+        conn.commit()
+
+    batch = enhancement_api.submit_derived_variant_batch(request, "s", body)
+
+    assert batch["status"] == "queued"
+    assert [item["output_key"] for item in batch["items"]] == ["batch/legacy.webp"]
+    assert batch["items"][0]["variant_id"] == variant_id
+    assert batch["items"][0]["job_id"] == earlier_job["id"]
+
+
 def test_derived_variant_batch_status_follows_items(settings, monkeypatch):
     request, preset_ids = _setup_batch(settings, monkeypatch)
     batch = enhancement_api.submit_derived_variant_batch(request, "s", {"object_ids": ["o", "o2"], "preset_ids": preset_ids[:1]})

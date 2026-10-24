@@ -718,34 +718,13 @@ def _plan_derived_batch(
     }
     if len(preset_rows) != len(set(preset_ids)) or any(row["project_id"] != scope["project_id"] for row in preset_rows.values()):
         raise AppError("PRESET_NOT_FOUND", "all presets must exist in the current project.", 404)
-    sources = []
-    for object_id in object_ids:
-        source = core.get_object(conn, scope_id, object_id)
-        if snapshot_id and source["revision"] != snapshot_revisions[object_id]:
-            raise AppError("OBJECT_REVISION_CHANGED", "A snapshot object changed after the snapshot was pinned.", 409, field="snapshot_id")
-        sources.append(source)
-    target_map = {(item["object_id"], item["preset_id"]): item["output_key"] for item in body.get("targets", [])}
-    items = []
-    for source in sources:
-        for preset_id in preset_ids:
-            preset_params = json.loads(preset_rows[preset_id]["params_json"])
-            output_key = target_map.get((source["id"], preset_id))
-            if not output_key:
-                seed = enhancements.sha256_text(enhancements.canonical_json({"object_id": source["id"], "source_revision": source["revision"], "preset_id": preset_id, "output_scope_id": output_scope_id}))
-                # Scope prefixes and output_prefix are literal; never add or strip slashes.
-                output_key = f"{output_scope['prefix']}{output_prefix}{seed[:32]}.{preset_params['format']}"
-            core.assert_key_in_scope(output_scope, output_key)
-            items.append(
-                {
-                    "object_id": source["id"],
-                    "source_revision": source["revision"],
-                    "preset_id": preset_id,
-                    "preset_version": preset_rows[preset_id]["version"],
-                    "output_scope_id": output_scope_id,
-                    "output_key": output_key,
-                    "state": "planned",
-                }
-            )
+    if batch is not None and batch["items"]:
+        # Resume the persisted plan: recomputing keys (for example under the
+        # literal output_prefix rule) would retarget pairs under the same
+        # idempotency key and conflict with jobs an earlier attempt queued.
+        items = _stored_batch_items(batch["items"], output_scope, output_scope_id, preset_rows)
+    else:
+        items = _new_batch_items(conn, scope_id, object_ids, preset_ids, preset_rows, snapshot_revisions if snapshot_id else None, body, output_scope, output_scope_id, output_prefix)
     if batch is None:
         batch = enhancements.create_batch(
             conn,
@@ -785,6 +764,60 @@ def _plan_derived_batch(
     batch = enhancements.update_batch_items(conn, batch_id, status="queued", items=queued)
     conn.commit()
     return _batch_public(conn, batch)
+
+
+def _new_batch_items(
+    conn,
+    scope_id: str,
+    object_ids: list[str],
+    preset_ids: list[str],
+    preset_rows: Mapping[str, Any],
+    snapshot_revisions: Mapping[str, str] | None,
+    body: Mapping[str, Any],
+    output_scope: Mapping[str, Any],
+    output_scope_id: str,
+    output_prefix: str,
+) -> list[dict[str, Any]]:
+    sources = []
+    for object_id in object_ids:
+        source = core.get_object(conn, scope_id, object_id)
+        if snapshot_revisions is not None and source["revision"] != snapshot_revisions[object_id]:
+            raise AppError("OBJECT_REVISION_CHANGED", "A snapshot object changed after the snapshot was pinned.", 409, field="snapshot_id")
+        sources.append(source)
+    target_map = {(item["object_id"], item["preset_id"]): item["output_key"] for item in body.get("targets", [])}
+    items = []
+    for source in sources:
+        for preset_id in preset_ids:
+            preset_params = json.loads(preset_rows[preset_id]["params_json"])
+            output_key = target_map.get((source["id"], preset_id))
+            if not output_key:
+                seed = enhancements.sha256_text(enhancements.canonical_json({"object_id": source["id"], "source_revision": source["revision"], "preset_id": preset_id, "output_scope_id": output_scope_id}))
+                # Scope prefixes and output_prefix are literal; never add or strip slashes.
+                output_key = f"{output_scope['prefix']}{output_prefix}{seed[:32]}.{preset_params['format']}"
+            core.assert_key_in_scope(output_scope, output_key)
+            items.append(
+                {
+                    "object_id": source["id"],
+                    "source_revision": source["revision"],
+                    "preset_id": preset_id,
+                    "preset_version": preset_rows[preset_id]["version"],
+                    "output_scope_id": output_scope_id,
+                    "output_key": output_key,
+                    "state": "planned",
+                }
+            )
+    return items
+
+
+def _stored_batch_items(stored: list[Mapping[str, Any]], output_scope: Mapping[str, Any], output_scope_id: str, preset_rows: Mapping[str, Any]) -> list[dict[str, Any]]:
+    items = []
+    for raw in stored:
+        item = dict(raw)
+        if item.get("output_scope_id") != output_scope_id or item.get("preset_id") not in preset_rows or not item.get("object_id") or not item.get("source_revision") or not item.get("output_key"):
+            raise AppError("BATCH_PLAN_INVALID", "The stored batch plan no longer matches this request; inspect the batch before retrying.", 409)
+        core.assert_key_in_scope(output_scope, item["output_key"])
+        items.append(item)
+    return items
 
 
 def _snapshot_revisions(conn, scope: Mapping[str, Any], actor: str, snapshot_id: str) -> dict[str, str]:
