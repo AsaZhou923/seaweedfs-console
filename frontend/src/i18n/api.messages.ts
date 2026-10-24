@@ -130,6 +130,7 @@ export const apiMessages: Record<string, Message> = {
   "Retention/legal hold write outcome is unknown; inspect the object version before retrying.": { en: "Retention/legal hold write outcome is unknown; inspect the object version before retrying.", "zh-CN": "保留/Legal Hold 写入结果未知；重试前请先核查对象版本。" },
   "retention or legal_hold is required.": { en: "retention or legal_hold is required.", "zh-CN": "需提供 retention 或 legal_hold。" },
   "copy target already exists; it was not overwritten": { en: "copy target already exists; it was not overwritten", "zh-CN": "复制目标已存在，未覆盖。" },
+  "bucket config must not be empty; an empty config cannot be saved": { en: "bucket config must not be empty; an empty config cannot be saved", "zh-CN": "Bucket 配置不能为空；无法保存空配置。" },
   "Storage scope authorization changed before dispatch.": { en: "Storage scope authorization changed before dispatch.", "zh-CN": "派发前存储范围授权已变化。" },
   "Storage scope is not linked to this management connection.": { en: "Storage scope is not linked to this management connection.", "zh-CN": "存储范围未关联到此管理连接。" },
   "TLS gRPC certificate file is empty.": { en: "TLS gRPC certificate file is empty.", "zh-CN": "TLS gRPC 证书文件为空。" },

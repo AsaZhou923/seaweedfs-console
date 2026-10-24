@@ -675,6 +675,78 @@ def test_bucket_versioning_and_object_lock_use_associated_s3_with_verify(api):
     assert s3.close_count >= 4
 
 
+@pytest.mark.parametrize(
+    ("path", "deleted_shape"),
+    [
+        ("/api/s3/buckets/photos/policy", {"bucket": "photos", "policy": None}),
+        ("/api/s3/buckets/photos/lifecycle", {"bucket": "photos", "rules": []}),
+        ("/api/s3/buckets/photos/lifecycle", {"bucket": "photos", "lifecycle": {"rules": []}}),
+    ],
+)
+def test_bucket_config_delete_confirms_with_4_48_wrapped_empty_readback(api, path, deleted_shape):
+    client, admin, _s3, operations = api
+    admin.responses[path] = {"bucket": "photos", "policy": {"Version": "2012-10-17", "Statement": []}, "rules": [{"id": "old"}]}
+    real_request = admin.request_json
+
+    def request_json(method, request_path, json_body=None, params=None, raw=False):
+        result = real_request(method, request_path, json_body, params, raw)
+        if method == "DELETE" and request_path == path:
+            admin.responses[path] = dict(deleted_shape)  # the 4.48 admin API wraps the emptied value
+        return result
+
+    admin.request_json = request_json
+
+    response = client.delete(f"/api/v1/management/mgmt_1/buckets/photos/{path.rsplit('/', 1)[1]}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "confirmed"
+    assert operations[-1]["method"] == "DELETE"
+
+
+@pytest.mark.parametrize(
+    "after",
+    [
+        {"bucket": "photos", "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow"}]}},
+        {"bucket": "photos", "policy": None, "statements": [{"Effect": "Allow"}]},
+        {"bucket": "photos"},
+        "deleted",
+    ],
+)
+def test_bucket_config_delete_verifier_rejects_remaining_or_unknown_content(after):
+    assert management_resources._config_deleted("policy", "Policy")(None, after, None) is False
+
+
+def test_object_lock_first_configuration_reads_empty_before_snapshot_and_confirms(api):
+    client, _admin, s3, operations = api
+    s3.object_lock_error_code = "ObjectLockConfigurationNotFoundError"
+    real_put = s3.put_object_lock_configuration
+
+    def put(**kwargs):
+        s3.object_lock_error_code = None
+        return real_put(**kwargs)
+
+    s3.put_object_lock_configuration = put
+    config = {"ObjectLockEnabled": "Enabled"}
+
+    response = client.put("/api/v1/management/mgmt_1/buckets/photos/object-lock", json={"object_lock_configuration": config})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "confirmed"
+    assert ("put_object_lock_configuration", {"Bucket": "photos", "ObjectLockConfiguration": config}) in s3.calls
+    assert operations[-1]["path"] == "/s3/buckets/photos/object-lock"
+
+
+def test_object_lock_before_read_failure_is_typed_and_not_dispatched(api):
+    client, _admin, s3, _operations = api
+    s3.object_lock_error_code = "AccessDenied"
+
+    response = client.put("/api/v1/management/mgmt_1/buckets/photos/object-lock", json={"object_lock_configuration": {"ObjectLockEnabled": "Enabled"}})
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "S3_CONFIGURATION_UNAVAILABLE"
+    assert not any(name == "put_object_lock_configuration" for name, _ in s3.calls)
+
+
 @pytest.mark.parametrize("code", ["NoSuchObjectLockConfiguration", "ObjectLockConfigurationNotFoundError"])
 def test_object_lock_missing_configuration_is_not_unsupported(api, code):
     client, _admin, s3, _operations = api
