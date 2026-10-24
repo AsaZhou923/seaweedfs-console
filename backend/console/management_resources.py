@@ -772,12 +772,14 @@ def _bucket_policy_match(policy: Mapping[str, Any]) -> Callable[[Any, Any, Any],
     return verify
 
 
-def _config_deleted(*fields: str) -> Callable[[Any, Any, Any], bool]:
-    """Confirm a delete from a readback that is empty or wraps an empty value.
+def _config_deleted(empty_values: Mapping[str, Callable[[Any], bool]]) -> Callable[[Any, Any, Any], bool]:
+    """Confirm a delete only from a readback in a recognized empty shape.
 
     The 4.48 admin API answers a deleted policy with ``{"bucket": b, "policy": null}``
-    and a deleted lifecycle with ``{"bucket": b, "rules": []}``. Only identifying
-    keys may sit beside the emptied field, so leftover content never counts as deleted.
+    and a deleted lifecycle with ``{"bucket": b, "rules": []}``. Each config field
+    has its own emptiness check, so a remaining document (even ``{"Statement": []}``)
+    or an unknown schema is never taken as proof of deletion, and only identifying
+    keys may sit beside it.
     """
 
     def verify(_before: Any, after: Any, _response: Any) -> bool:
@@ -785,18 +787,29 @@ def _config_deleted(*fields: str) -> Callable[[Any, Any, Any], bool]:
             return True
         if not isinstance(after, Mapping):
             return False
-        present = [field for field in fields if field in after]
-        if not present or set(after) - set(fields) - {"bucket", "name"}:
+        present = [field for field in empty_values if field in after]
+        if not present or set(after) - set(empty_values) - {"bucket", "name"}:
             return False
-        return all(_empty_config_value(after[field]) for field in present)
+        return all(empty_values[field](after[field]) for field in present)
 
     return verify
 
 
-def _empty_config_value(value: Any) -> bool:
-    if value in (None, {}, [], ""):
-        return True
-    return isinstance(value, Mapping) and all(item in (None, {}, [], "") for item in value.values())
+def _no_policy(value: Any) -> bool:
+    return value is None or value == "" or value == {}
+
+
+def _no_lifecycle_rules(value: Any) -> bool:
+    return value is None or value == []
+
+
+def _no_lifecycle(value: Any) -> bool:
+    # Only {} or the documented wrapper {"rules": []}; any other key is unknown schema.
+    return value is None or value == {} or (isinstance(value, Mapping) and set(value) == {"rules"} and _no_lifecycle_rules(value["rules"]))
+
+
+_POLICY_DELETED = _config_deleted({"policy": _no_policy, "Policy": _no_policy})
+_LIFECYCLE_DELETED = _config_deleted({"rules": _no_lifecycle_rules, "lifecycle": _no_lifecycle})
 
 
 def _versioning_matches(status: str) -> Callable[[Any, Any, Any], bool]:
@@ -1266,7 +1279,7 @@ def update_bucket_lifecycle(request: Request, management_id: str, bucket: str, b
 @router.delete("/{management_id}/buckets/{bucket}/lifecycle")
 def delete_bucket_lifecycle(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", verify=_config_deleted("rules", "lifecycle"))
+    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", verify=_LIFECYCLE_DELETED)
 
 
 @router.get("/{management_id}/buckets/{bucket}/policy")
@@ -1289,7 +1302,7 @@ def update_bucket_policy(request: Request, management_id: str, bucket: str, body
 @router.delete("/{management_id}/buckets/{bucket}/policy")
 def delete_bucket_policy(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/policy", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/policy", verify=_config_deleted("policy", "Policy"))
+    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/policy", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/policy", verify=_POLICY_DELETED)
 
 
 @router.get("/{management_id}/iam/users")

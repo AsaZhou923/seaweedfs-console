@@ -704,16 +704,21 @@ def test_bucket_config_delete_confirms_with_4_48_wrapped_empty_readback(api, pat
 
 
 @pytest.mark.parametrize(
-    "after",
+    ("verifier", "after"),
     [
-        {"bucket": "photos", "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow"}]}},
-        {"bucket": "photos", "policy": None, "statements": [{"Effect": "Allow"}]},
-        {"bucket": "photos"},
-        "deleted",
+        ("_POLICY_DELETED", {"bucket": "photos", "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow"}]}}),
+        ("_POLICY_DELETED", {"bucket": "photos", "policy": {"Statement": []}}),
+        ("_POLICY_DELETED", {"bucket": "photos", "policy": None, "statements": [{"Effect": "Allow"}]}),
+        ("_POLICY_DELETED", {"bucket": "photos"}),
+        ("_POLICY_DELETED", "deleted"),
+        ("_LIFECYCLE_DELETED", {"bucket": "photos", "rules": [{"id": "expire"}]}),
+        ("_LIFECYCLE_DELETED", {"bucket": "photos", "lifecycle": {"unexpected": []}}),
+        ("_LIFECYCLE_DELETED", {"bucket": "photos", "lifecycle": {"rules": [], "transitions": []}}),
+        ("_LIFECYCLE_DELETED", {"bucket": "photos", "policy": None}),
     ],
 )
-def test_bucket_config_delete_verifier_rejects_remaining_or_unknown_content(after):
-    assert management_resources._config_deleted("policy", "Policy")(None, after, None) is False
+def test_bucket_config_delete_verifier_rejects_remaining_or_unknown_content(verifier, after):
+    assert getattr(management_resources, verifier)(None, after, None) is False
 
 
 def test_object_lock_first_configuration_reads_empty_before_snapshot_and_confirms(api):
