@@ -750,15 +750,23 @@ def _collections(client: AdminClient, mgmt: dict[str, Any]) -> dict[str, Any]:
     collections: dict[str, dict[str, Any]] = {}
     for row in rows:
         name = row.get("collection") or "default"
-        item = collections.setdefault(name, {"name": name, "physical_replicas": 0, "logical_ids": set(), "ec_volumes": None, "size_bytes": 0, "file_count": None, "state": "reported"})
+        item = collections.setdefault(name, {"name": name, "physical_replicas": 0, "logical_ids": set(), "logical_sizes": {}, "unattributed_size": False, "ec_volumes": None, "physical_replica_bytes": 0, "file_count": None, "state": "reported"})
         item["physical_replicas"] += 1
         if row.get("id") is not None:
             item["logical_ids"].add(row.get("id"))
         if isinstance(row.get("size"), int):
-            item["size_bytes"] += row["size"]
+            item["physical_replica_bytes"] += row["size"]
+            if row.get("id") is None:
+                item["unattributed_size"] = True
+            else:
+                # Replicas of one logical volume hold the same data; count it once.
+                item["logical_sizes"][row["id"]] = max(item["logical_sizes"].get(row["id"], 0), row["size"])
     public = []
     for item in collections.values():
-        public.append({**{k: v for k, v in item.items() if k != "logical_ids"}, "logical_volumes": len(item["logical_ids"])})
+        # A sized replica without a volume ID cannot be de-duplicated, so the logical size is unknown.
+        size_bytes = None if item["unattributed_size"] else sum(item["logical_sizes"].values())
+        private = {"logical_ids", "logical_sizes", "unattributed_size"}
+        public.append({**{k: v for k, v in item.items() if k not in private}, "logical_volumes": len(item["logical_ids"]), "size_bytes": size_bytes})
     return _envelope(mgmt, client, {"items": sorted(public, key=lambda x: x["name"]), "module_status": result["status"], "evidence": result["evidence"]})
 
 
@@ -846,7 +854,8 @@ def _health_status_from_error(exc: AppError) -> str:
         "NATIVE_FORBIDDEN": "permission_denied",
         "NATIVE_TIMEOUT": "unreachable",
         "NATIVE_UNREACHABLE": "unreachable",
-        "NATIVE_NOT_FOUND": "not_configured",
+        # A 404 from a configured endpoint means the path is absent there, not that nothing is configured.
+        "NATIVE_NOT_FOUND": "not_found",
         "NATIVE_BAD_RESPONSE": "bad_response",
         "NATIVE_RESPONSE_TOO_LARGE": "bad_response",
         "SECRET_REF_NOT_FOUND": "permission_denied",
@@ -893,7 +902,7 @@ def _s3_exception_status(exc: Exception) -> str:
     if status == 403:
         return "permission_denied"
     if status == 404:
-        return "not_configured"
+        return "not_found"
     if status in {501, 405} or code in {"NotImplemented", "NotSupported"}:
         return "unsupported"
     return "unreachable" if code in {"EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError"} else "unknown"
@@ -906,7 +915,7 @@ def _fetch_optional(client: AdminClient, path: str) -> dict[str, Any]:
     except AppError as exc:
         status = {
             "ADMIN_FORBIDDEN": "permission_denied",
-            "ADMIN_ENDPOINT_NOT_FOUND": "not_configured",
+            "ADMIN_ENDPOINT_NOT_FOUND": "not_found",
             "ADMIN_ENDPOINT_UNSUPPORTED": "unsupported",
             "ADMIN_TIMEOUT": "unreachable",
             "ADMIN_UNREACHABLE": "unreachable",
@@ -1231,9 +1240,15 @@ def _normalize_endpoint(value: str) -> str:
         or ".." in decoded.split("/")
     ):
         raise AppError("INVALID_ENDPOINT", "Management endpoint must be a credential-free HTTP(S) origin.", 422)
-    netloc = parsed.hostname.lower()
-    if parsed.port:
-        netloc += f":{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise AppError("INVALID_ENDPOINT", "Management endpoint must be a credential-free HTTP(S) origin.", 422) from exc
+    host = parsed.hostname.lower()
+    # urlsplit strips IPv6 brackets from hostname; without them the port is unparseable.
+    netloc = f"[{host}]" if ":" in host else host
+    if port:
+        netloc += f":{port}"
     path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
 

@@ -350,8 +350,10 @@ def _capacity_result_for_project(conn, project_id: str) -> dict:
           SELECT format, COALESCE(SUM(size),0) AS bytes FROM physical GROUP BY format
         """, (project_id,))
     }
+    # Keyed "connection_id/bucket": same-named buckets on different connections are
+    # different storage, and "/" cannot occur in a bucket name.
     by_bucket = {
-        row["bucket"]: row["bytes"]
+        f"{row['connection_id']}/{row['bucket']}": row["bytes"]
         for row in conn.execute("""
           WITH physical AS (
             SELECT s.connection_id,s.bucket,o.key,MAX(COALESCE(o.size,0)) AS size
@@ -359,7 +361,7 @@ def _capacity_result_for_project(conn, project_id: str) -> dict:
             WHERE s.project_id=? AND s.is_active=1 AND o.is_current=1 AND o.presence='present'
             GROUP BY s.connection_id,s.bucket,o.key
           )
-          SELECT bucket, COALESCE(SUM(size),0) AS bytes FROM physical GROUP BY bucket
+          SELECT connection_id, bucket, COALESCE(SUM(size),0) AS bytes FROM physical GROUP BY connection_id, bucket
         """, (project_id,))
     }
     scanned = conn.execute("SELECT COUNT(*) FROM scan_runs r JOIN scopes s ON s.id=r.scope_id WHERE s.project_id=? AND r.enumeration='complete'", (project_id,)).fetchone()[0]

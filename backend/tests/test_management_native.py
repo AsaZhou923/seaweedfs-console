@@ -1130,7 +1130,8 @@ def test_maintenance_job_detail_reports_unknown_when_upstream_missing(api):
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["job"]["status"] in {"not_configured", "unknown"}
+    # The admin endpoint is configured; a 404 for the job is "not found", never "not configured".
+    assert body["job"]["status"] == "not_found"
     assert body["detail"]["status"] == "supported"
     assert body["detail"]["data"]["job_id"] == "missing"
 
@@ -1327,7 +1328,8 @@ def test_modules_and_mq_do_not_fake_zero_for_unconfigured_sources(api):
     assert modules.status_code == 200, modules.text
     body = modules.json()
     assert body["admin"]["data"]["message_brokers"] is None
-    assert body["s3_tables"]["s3_tables_buckets"]["status"] == "not_configured"
+    # The configured admin endpoint answered 404 for the S3 Tables route.
+    assert body["s3_tables"]["s3_tables_buckets"]["status"] == "not_found"
     assert body["optional_services"]["mount_clients"] == "unknown"
 
     topic = client.get(f"/api/v1/management/{conn['id']}/modules/mq/topics/ns/topic")
