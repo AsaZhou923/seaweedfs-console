@@ -998,7 +998,8 @@ def cors_diagnostic(request: Request, scope_id: str, body: dict):
         result = "configured" if rules else "not_configured"
     except Exception as exc:
         rules = []
-        result = storage.sanitize_storage_exception(exc).code
+        error = storage.sanitize_storage_exception(exc)
+        result = "not_configured" if error.code == "NOT_CONFIGURED" else error.code
     preflight = {"attempted": False, "position": "server", "status": "not_requested"}
     object_id = body.get("object_id")
     endpoint = _approved_distribution_endpoint(connection, body.get("endpoint_id"))

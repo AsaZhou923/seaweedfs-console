@@ -199,12 +199,45 @@ def stream_object_body(body: Any, chunk_size: int = 1024 * 1024) -> Iterator[byt
             yield chunk
 
 
+NOT_CONFIGURED_CODES = frozenset({
+    "NoSuchCORSConfiguration",
+    "NoSuchCORS",
+    "NoSuchLifecycleConfiguration",
+    "NoSuchBucketPolicy",
+    "NoSuchObjectLockConfiguration",
+    "NoSuchBucketObjectLockConfiguration",
+    "ObjectLockConfigurationNotFoundError",
+})
+UNSUPPORTED_CODES = frozenset({"NotImplemented", "NotSupported", "UnsupportedOperation"})
+
+
 def sanitize_storage_exception(exc: Exception) -> StorageError:
+    """Map an S3 failure to a safe error that keeps unknown, absent and rejected apart."""
+    if isinstance(exc, StorageError):
+        return exc
     status = _status_from_exception(exc)
+    code = _code_from_exception(exc)
+    if code in NOT_CONFIGURED_CODES:
+        return StorageError("NOT_CONFIGURED", "The bucket has no such configuration.", 404)
+    if status == 501 or code in UNSUPPORTED_CODES:
+        return StorageError("STORAGE_UNSUPPORTED", "Storage does not support this request.", 501)
     if status == 403:
         return StorageError("STORAGE_FORBIDDEN", "Storage denied the request.", 403)
     if status == 404:
         return StorageError("OBJECT_NOT_FOUND", "Storage object was not found.", 404)
     if status == 412:
         return StorageError("STORAGE_PRECONDITION_FAILED", "Storage precondition failed.", 412)
+    if isinstance(status, int) and 400 <= status < 500 and status != 408:
+        return StorageError("STORAGE_REJECTED", "Storage rejected the request.", status)
     return StorageError("STORAGE_UNAVAILABLE", "Storage is unavailable.", 503)
+
+
+def is_known_rejection(exc: BaseException) -> bool:
+    """True when storage answered with a definite refusal, so a write did not happen.
+
+    Timeouts, 5xx and unrecognised failures stay uncertain: the request may
+    have been applied even though no usable answer came back.
+    """
+    if not isinstance(exc, StorageError):
+        return False
+    return exc.code == "STORAGE_UNSUPPORTED" or (400 <= exc.status < 500 and exc.status != 408)

@@ -588,6 +588,116 @@ def test_run_once_preserves_storage_error_code(settings, monkeypatch):
     assert jobs.error_code(RuntimeError("boom")) == "WORKER_FAILURE"
 
 
+class S3Error(Exception):
+    def __init__(self, status, code):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}
+
+
+def _retention_setup(settings, monkeypatch, *, lock=None):
+    setup_variant(settings)
+    fake = FakeS3()
+    calls = []
+    if lock is None:
+        def lock_config(Bucket):
+            raise S3Error(404, "ObjectLockConfigurationNotFoundError")
+    else:
+        def lock_config(Bucket):
+            return {"ObjectLockConfiguration": lock}
+    fake.get_object_lock_configuration = lock_config
+    real_retention, real_hold = fake.put_object_retention, fake.put_object_legal_hold
+    fake.put_object_retention = lambda **kwargs: (calls.append("retention"), real_retention(**kwargs))[1]
+    fake.put_object_legal_hold = lambda **kwargs: (calls.append("legal_hold"), real_hold(**kwargs))[1]
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda conn, settings, scope: enhancement_api.S3EnhancementAdapter(fake))
+    monkeypatch.setattr(enhancement_api, "mutation", lambda request: SimpleNamespace(id="admin"))
+    monkeypatch.setattr(enhancement_api, "_require_scope", lambda request, scope_id, write=False, manage_bucket=False: core.ensure_scope_permission(db.connect(settings), scope_id, "object:read"))
+    monkeypatch.setattr(enhancement_api.core, "require_object", lambda request, scope_id, object_id: core.get_object(db.connect(settings), scope_id, object_id))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), headers={}, cookies={})
+    return request, fake, calls
+
+
+def _retention_intents(settings):
+    with db.connect(settings) as conn:
+        return [tuple(row) for row in conn.execute("SELECT status, error FROM operation_intents WHERE operation_type='object.retention.put' ORDER BY rowid")]
+
+
+RETENTION = {"Mode": "GOVERNANCE", "RetainUntilDate": "2030-01-01T00:00:00Z"}
+ENABLED = {"ObjectLockEnabled": "Enabled"}
+
+
+@pytest.mark.parametrize("body", [{"retention": RETENTION}, {"legal_hold": {"Status": "ON"}}])
+def test_retention_and_legal_hold_writes_require_bucket_object_lock(settings, monkeypatch, body):
+    request, _fake, calls = _retention_setup(settings, monkeypatch)
+
+    with pytest.raises(AppError) as error:
+        enhancement_api.retention_write(request, "s", "o", body | {"version_id": "v1"})
+
+    assert (error.value.code, error.value.status) == ("OBJECT_LOCK_NOT_CONFIGURED", 409)
+    assert calls == []
+    assert _retention_intents(settings) == []
+
+
+def test_retention_write_refuses_bucket_with_lock_disabled(settings, monkeypatch):
+    request, _fake, calls = _retention_setup(settings, monkeypatch, lock={})
+
+    with pytest.raises(AppError) as error:
+        enhancement_api.retention_write(request, "s", "o", {"retention": RETENTION, "version_id": "v1"})
+
+    assert error.value.code == "OBJECT_LOCK_NOT_CONFIGURED"
+    assert calls == []
+
+
+def test_retention_write_succeeds_on_object_lock_bucket_with_readback(settings, monkeypatch):
+    request, _fake, calls = _retention_setup(settings, monkeypatch, lock=ENABLED)
+
+    result = enhancement_api.retention_write(request, "s", "o", {"retention": RETENTION, "legal_hold": {"Status": "ON"}, "version_id": "v1"})
+
+    assert calls == ["retention", "legal_hold"]
+    assert result["retention"] == RETENTION
+    assert [status for status, _ in _retention_intents(settings)] == ["succeeded"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "status_code", "intent_status", "api_code"),
+    [
+        (S3Error(503, "ServiceUnavailable"), None, "needs_review", "RETENTION_OUTCOME_UNKNOWN"),
+        (RuntimeError("read timed out"), None, "needs_review", "RETENTION_OUTCOME_UNKNOWN"),
+        (S3Error(400, "InvalidRequest"), 400, "failed", "STORAGE_REJECTED"),
+    ],
+)
+def test_retention_write_lost_response_needs_review_but_refusal_fails(settings, monkeypatch, failure, status_code, intent_status, api_code):
+    request, fake, _calls = _retention_setup(settings, monkeypatch, lock=ENABLED)
+
+    def broken(**kwargs):
+        raise failure
+
+    fake.put_object_retention = broken
+
+    with pytest.raises(AppError) as error:
+        enhancement_api.retention_write(request, "s", "o", {"retention": RETENTION, "version_id": "v1"})
+
+    assert error.value.code == api_code
+    if status_code:
+        assert error.value.status == status_code
+    assert [status for status, _ in _retention_intents(settings)] == [intent_status]
+
+
+def test_retention_partial_write_then_refusal_needs_review(settings, monkeypatch):
+    request, fake, calls = _retention_setup(settings, monkeypatch, lock=ENABLED)
+
+    def refused(**kwargs):
+        raise S3Error(400, "InvalidRequest")
+
+    fake.put_object_legal_hold = refused
+
+    with pytest.raises(AppError) as error:
+        enhancement_api.retention_write(request, "s", "o", {"retention": RETENTION, "legal_hold": {"Status": "ON"}, "version_id": "v1"})
+
+    assert error.value.code == "RETENTION_OUTCOME_UNKNOWN"
+    assert calls == ["retention"]
+    assert [status for status, _ in _retention_intents(settings)] == ["needs_review"]
+
+
 def test_identity_keeps_zero_byte_size():
     assert enhancement_api._identity("bucket", "empty.jpg", {"ContentLength": 0, "Size": 5})["size"] == 0
     assert enhancement_api._identity("bucket", "listed.jpg", {"Size": 0})["size"] == 0

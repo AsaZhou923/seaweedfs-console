@@ -58,6 +58,10 @@ class ConflictError(EnhancementError):
     code = "CONFLICT"
 
 
+class TargetExists(ConflictError):
+    code = "TARGET_EXISTS"
+
+
 class ProtectedError(EnhancementError):
     code = "PROTECTED_BY_REFERENCE"
 
@@ -1220,6 +1224,7 @@ def copy_object_safely(
                 "target": {"bucket": target_bucket, "key": target_key},
             },
         )
+    phase = "prepare"
     try:
         data = conditional_read(source_bucket, source_key, bound_version, source_etag)
         fresh_source = _call_required(adapter, "head_object", source_bucket, source_key, bound_version)
@@ -1227,7 +1232,17 @@ def copy_object_safely(
         content_type = _get_attr(source_head, "content_type") or "application/octet-stream"
         merged_metadata = dict(_get_attr(source_head, "metadata") or {})
         merged_metadata.update(dict(metadata or {}))
-        _call_required(adapter, "put_object", target_bucket, target_key, data, merged_metadata, content_type)
+        phase = "dispatch"
+        try:
+            _call_required(adapter, "put_object", target_bucket, target_key, data, merged_metadata, content_type)
+        except Exception as exc:
+            if _write_refused(exc):
+                phase = "refused"
+            if getattr(exc, "status", None) == 412:
+                # IfNoneMatch=* was refused: the target already existed and was not overwritten.
+                raise TargetExists("copy target already exists; it was not overwritten") from exc
+            raise
+        phase = "verify"
         target_head = _call_required(adapter, "head_object", target_bucket, target_key)
         _verify_copy_result(source_head, target_head)
         target_data = _call_required(adapter, "get_object_bytes", target_bucket, target_key, _get_attr(target_head, "version_id"))
@@ -1239,9 +1254,20 @@ def copy_object_safely(
             _finish_intent(conn, intent_id, "succeeded", result=result)
         return {"status": "succeeded", **result}
     except Exception as exc:
+        # Nothing was written before dispatch or when storage refused the put;
+        # any later failure leaves the target outcome unverified.
+        state = "failed" if phase in ("prepare", "refused") else "needs_review"
         with _transaction(conn):
-            _finish_intent(conn, intent_id, "needs_review", error=str(exc))
+            _finish_intent(conn, intent_id, state, error=f"{getattr(exc, 'code', type(exc).__name__)}: {exc}")
         raise
+
+
+def _write_refused(exc: BaseException) -> bool:
+    """A definite 4xx/501 answer to a write proves it was not applied; 408/5xx/unknown do not."""
+    status = getattr(exc, "status", None)
+    if getattr(exc, "code", None) == "STORAGE_UNSUPPORTED":
+        return True
+    return isinstance(status, int) and 400 <= status < 500 and status != 408
 
 
 def move_object_protected(

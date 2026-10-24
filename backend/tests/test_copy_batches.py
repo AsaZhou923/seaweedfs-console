@@ -225,6 +225,78 @@ def test_archived_output_scope_blocks_before_storage_calls(foundation):
     assert item["error_code"] == "FORBIDDEN_SCOPE"
 
 
+def _single_copy(settings, source_s3, source_scope, target_scope):
+    obj = seed_source(settings, source_s3, source_scope, "raw/a.jpg", b"alpha")
+    submit(settings, source_scope, [{"object_id": obj["id"], "target_scope_id": target_scope["id"], "target_key": "copied/a.jpg"}])
+    run_next(settings)
+    with db.connect(settings) as conn:
+        return dict(conn.execute("SELECT phase, error_code, result_json FROM copy_batch_items").fetchone())
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "phase", "error_code"),
+    [
+        (403, "AccessDenied", "failed", "STORAGE_FORBIDDEN"),
+        (400, "InvalidRequest", "failed", "STORAGE_REJECTED"),
+        (503, "SlowDown", "needs_review", "STORAGE_UNAVAILABLE"),
+        (408, "RequestTimeout", "needs_review", "STORAGE_UNAVAILABLE"),
+    ],
+)
+def test_put_failure_is_failed_only_when_storage_definitely_refused(foundation, status, code, phase, error_code):
+    settings, source_s3, target_s3, source_scope, target_scope = foundation
+
+    def refuse(**kwargs):
+        target_s3.put_calls.append(dict(kwargs))
+        raise ClientError(status, code)
+
+    target_s3.put_object = refuse
+
+    item = _single_copy(settings, source_s3, source_scope, target_scope)
+
+    assert (item["phase"], item["error_code"]) == (phase, error_code)
+    assert len(target_s3.put_calls) == 1
+
+
+def test_verification_error_after_successful_put_needs_review(foundation):
+    settings, source_s3, target_s3, source_scope, target_scope = foundation
+    real_put = target_s3.put_object
+    real_head = target_s3.head_object
+    written = {"done": False}
+
+    def put(**kwargs):
+        written["done"] = True
+        return real_put(**kwargs)
+
+    def head(**kwargs):
+        # The credential can write but cannot read back what it wrote.
+        if written["done"]:
+            raise ClientError(403, "AccessDenied")
+        return real_head(**kwargs)
+
+    target_s3.put_object = put
+    target_s3.head_object = head
+
+    item = _single_copy(settings, source_s3, source_scope, target_scope)
+
+    assert (item["phase"], item["error_code"]) == ("needs_review", "STORAGE_FORBIDDEN")
+    assert written["done"]
+    assert target_s3.objects[(target_scope["bucket"], "copied/a.jpg")]["Body"] == b"alpha"
+
+
+def test_source_read_failure_before_dispatch_is_failed(foundation):
+    settings, source_s3, target_s3, source_scope, target_scope = foundation
+
+    def unavailable(**kwargs):
+        raise ClientError(503, "SlowDown")
+
+    source_s3.get_object = unavailable
+
+    item = _single_copy(settings, source_s3, source_scope, target_scope)
+
+    assert (item["phase"], item["error_code"]) == ("failed", "STORAGE_UNAVAILABLE")
+    assert target_s3.put_calls == []
+
+
 def test_batch_two_copies_mixed_results_indexes_confirmed_target_and_never_deletes_source(foundation):
     settings, source_s3, target_s3, source_scope, target_scope = foundation
     first = seed_source(settings, source_s3, source_scope, "raw/a.jpg", b"alpha")

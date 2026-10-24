@@ -333,6 +333,9 @@ async function createPage(browser, url) {
   const page = await Cdp.connect(pageTarget.webSocketDebuggerUrl);
   await page.send("Page.enable");
   await page.send("Runtime.enable");
+  // A new target starts on about:blank; helpers injected before the real
+  // document commits are lost with that window (seen on slower Windows runners).
+  await waitFor(page, `location.href !== "about:blank" && document.readyState !== "loading"`);
   return page;
 }
 
