@@ -623,6 +623,36 @@ def create_derived_variant_intent(
     actor_id: str | None = None,
 ) -> dict[str, Any]:
     initialize(conn)
+    with _transaction(conn):
+        variant_id = plan_derived_variant(
+            conn,
+            project_id=project_id,
+            scope_id=scope_id,
+            source_object_id=source_object_id,
+            source_revision=source_revision,
+            preset_id=preset_id,
+            output_scope_id=output_scope_id,
+            output_bucket=output_bucket,
+            output_key=output_key,
+            actor_id=actor_id,
+        )
+    return get_derived_variant(conn, variant_id)
+
+
+def plan_derived_variant(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    scope_id: str,
+    source_object_id: str,
+    source_revision: str,
+    preset_id: str,
+    output_scope_id: str,
+    output_bucket: str,
+    output_key: str | None,
+    actor_id: str | None,
+) -> str:
+    """Insert or reuse a planned variant without committing the caller's transaction."""
     preset = conn.execute(
         "SELECT params_json, params_hash FROM enhancement_presets WHERE id=?",
         (_require_nonempty(preset_id, "preset_id"),),
@@ -655,9 +685,9 @@ def create_derived_variant_intent(
         "output_key": output_key,
     }
     binding_hash = sha256_text(canonical_json(binding))
-    existing = conn.execute("SELECT * FROM derived_variants WHERE input_binding_hash=?", (binding_hash,)).fetchone()
+    existing = conn.execute("SELECT id FROM derived_variants WHERE input_binding_hash=?", (binding_hash,)).fetchone()
     if existing:
-        return _variant_row_to_dict(existing)
+        return existing[0]
 
     variant_id = f"variant_{binding_hash[:32]}"
     now = utc_now()
@@ -668,41 +698,40 @@ def create_derived_variant_intent(
         "status": "planned",
         "output": {"scope_id": output_scope_id, "bucket": output_bucket, "key": output_key},
     }
-    with _transaction(conn):
-        conn.execute(
-            """
-            INSERT INTO derived_variants
-              (id, project_id, scope_id, source_object_id, source_revision, preset_id,
-               output_scope_id, output_bucket, output_key, input_binding_hash, status,
-               manifest_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)
-            """,
-            (
-                variant_id,
-                project_id,
-                scope_id,
-                source_object_id,
-                source_revision,
-                preset_id,
-                output_scope_id,
-                output_bucket,
-                output_key,
-                binding_hash,
-                canonical_json(manifest),
-                now,
-                now,
-            ),
-        )
-        create_audit_event(
-            conn,
-            "derived.intent",
-            actor_id=actor_id,
-            scope_id=scope_id,
-            target={"variant_id": variant_id, "source_object_id": source_object_id, "output_key": output_key},
-            result="planned",
-            detail={"input_binding_hash": binding_hash},
-        )
-    return get_derived_variant(conn, variant_id)
+    conn.execute(
+        """
+        INSERT INTO derived_variants
+          (id, project_id, scope_id, source_object_id, source_revision, preset_id,
+           output_scope_id, output_bucket, output_key, input_binding_hash, status,
+           manifest_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)
+        """,
+        (
+            variant_id,
+            project_id,
+            scope_id,
+            source_object_id,
+            source_revision,
+            preset_id,
+            output_scope_id,
+            output_bucket,
+            output_key,
+            binding_hash,
+            canonical_json(manifest),
+            now,
+            now,
+        ),
+    )
+    create_audit_event(
+        conn,
+        "derived.intent",
+        actor_id=actor_id,
+        scope_id=scope_id,
+        target={"variant_id": variant_id, "source_object_id": source_object_id, "output_key": output_key},
+        result="planned",
+        detail={"input_binding_hash": binding_hash},
+    )
+    return variant_id
 
 
 def _variant_row_to_dict(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
@@ -745,7 +774,25 @@ def get_derived_variant(conn: sqlite3.Connection, variant_id: str) -> dict[str, 
     return _variant_row_to_dict(row)
 
 
-def create_or_get_batch(
+def find_batch(
+    conn: sqlite3.Connection,
+    *,
+    scope_id: str,
+    idempotency_key: str,
+    request_body: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the batch already recorded for this key, rejecting a changed body."""
+    if not idempotency_key:
+        raise ValidationError("idempotency_key is required for derived variant batches")
+    existing = conn.execute("SELECT id, request_hash FROM derived_variant_batches WHERE scope_id=? AND idempotency_key=?", (scope_id, idempotency_key)).fetchone()
+    if not existing:
+        return None
+    if existing["request_hash"] != sha256_text(canonical_json(dict(request_body))):
+        raise ConflictError("derived batch idempotency key was reused with a different request body")
+    return get_derived_batch(conn, existing["id"])
+
+
+def create_batch(
     conn: sqlite3.Connection,
     *,
     scope_id: str,
@@ -754,41 +801,33 @@ def create_or_get_batch(
     request_body: Mapping[str, Any],
     planned_count: int,
     items: list[Mapping[str, Any]],
-) -> tuple[dict[str, Any] | None, str]:
-    initialize(conn)
+) -> dict[str, Any]:
+    """Insert a ``planning`` batch; the caller owns the surrounding transaction."""
     if not idempotency_key:
         raise ValidationError("idempotency_key is required for derived variant batches")
     request_hash = sha256_text(canonical_json(dict(request_body)))
-    existing = conn.execute("SELECT * FROM derived_variant_batches WHERE scope_id=? AND idempotency_key=?", (scope_id, idempotency_key)).fetchone()
-    if existing:
-        if existing["request_hash"] != request_hash:
-            raise ConflictError("derived batch idempotency key was reused with a different request body")
-        return get_derived_batch(conn, existing["id"]), request_hash
     batch_id = new_id("batch")
     now = utc_now()
-    with _transaction(conn):
-        conn.execute(
-            """
-            INSERT INTO derived_variant_batches
-              (id, scope_id, project_id, request_hash, idempotency_key, status, planned_count, items_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'planning', ?, ?, ?, ?)
-            """,
-            (batch_id, scope_id, project_id, request_hash, idempotency_key, int(planned_count), canonical_json([dict(item) for item in items]), now, now),
-        )
-    return None, request_hash
+    conn.execute(
+        """
+        INSERT INTO derived_variant_batches
+          (id, scope_id, project_id, request_hash, idempotency_key, status, planned_count, items_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'planning', ?, ?, ?, ?)
+        """,
+        (batch_id, scope_id, project_id, request_hash, idempotency_key, int(planned_count), canonical_json([dict(item) for item in items]), now, now),
+    )
+    return get_derived_batch(conn, batch_id)
 
 
 def update_batch_items(conn: sqlite3.Connection, batch_id: str, *, status: str, items: list[Mapping[str, Any]]) -> dict[str, Any]:
-    with _transaction(conn):
-        conn.execute(
-            "UPDATE derived_variant_batches SET status=?, items_json=?, updated_at=? WHERE id=?",
-            (status, canonical_json([dict(item) for item in items]), utc_now(), batch_id),
-        )
+    conn.execute(
+        "UPDATE derived_variant_batches SET status=?, items_json=?, updated_at=? WHERE id=?",
+        (status, canonical_json([dict(item) for item in items]), utc_now(), batch_id),
+    )
     return get_derived_batch(conn, batch_id)
 
 
 def get_derived_batch(conn: sqlite3.Connection, batch_id: str) -> dict[str, Any]:
-    initialize(conn)
     row = conn.execute("SELECT * FROM derived_variant_batches WHERE id=?", (batch_id,)).fetchone()
     if not row:
         raise NotFound("derived variant batch not found")

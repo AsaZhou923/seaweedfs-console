@@ -529,7 +529,7 @@ def _run_app_flow(config: SmokeConfig, bucket: str, tmp_dir: Path) -> None:
         "object_ids": [normal["id"], second_source["id"]],
         "preset_ids": [preset1["id"], preset2["id"]],
         "output_scope_id": output_scope["id"],
-        "output_prefix": "derived/batch",
+        "output_prefix": "derived/batch/",
         "idempotency_key": "derived-batch-two-by-two-v1",
     }
     derived_batch = _assert_ok(
