@@ -205,6 +205,12 @@ class S3EnhancementAdapter:
         except Exception as exc:
             raise storage.sanitize_storage_exception(exc) from exc
 
+    def get_object_lock_configuration(self, bucket: str) -> dict[str, Any]:
+        try:
+            return self.s3.get_object_lock_configuration(Bucket=bucket).get("ObjectLockConfiguration") or {}
+        except Exception as exc:
+            raise storage.sanitize_storage_exception(exc) from exc
+
     def put_object_retention(self, bucket: str, key: str, retention: Mapping[str, Any], version_id: str | None = None) -> None:
         kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key, "Retention": dict(retention)}
         if _version_id_provided(version_id):
@@ -1238,20 +1244,14 @@ def retention_write(request: Request, scope_id: str, object_id: str, body: dict[
     version_id = body.get("version_id") or obj.get("version_id")
     if not version_id or version_id == "null":
         raise AppError("UNSUPPORTED_CAPABILITY", "retention/legal hold 写入需要固定对象版本。", 501)
+    if "retention" not in body and "legal_hold" not in body:
+        raise AppError("INVALID_REQUEST", "retention or legal_hold is required.", 422)
     with db.connect(request.app.state.settings) as conn:
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         enhancements.initialize(conn)
-        capabilities = {}
-        try:
-            connection = core._connection_private(conn, scope["connection_id"])
-            capabilities = json.loads(connection.get("capabilities_json") or "{}")
-        except Exception:
-            capabilities = {}
-        capability_values = json.dumps(capabilities).lower()
-        if "object_lock" in capabilities and capabilities.get("object_lock") not in ("supported", True):
-            raise AppError("UNSUPPORTED_CAPABILITY", "当前连接未证明支持 object lock/retention 写入。", 501)
-        if "retention" in body and "object_lock" not in capability_values and "retention" not in capability_values:
-            raise AppError("UNSUPPORTED_CAPABILITY", "当前连接未证明支持 retention 写入。", 501)
+        # Retention and legal hold both need object lock on this bucket; prove it
+        # with a live bucket read before recording any intent.
+        _require_object_lock(adapter, scope["bucket"])
         intent_id, _ = enhancements._operation_intent(
             conn,
             "object.retention.put",
@@ -1259,19 +1259,46 @@ def retention_write(request: Request, scope_id: str, object_id: str, body: dict[
             target={"bucket": scope["bucket"], "key": obj["key"], "version_id": version_id, "body": body},
         )
         conn.commit()
+        applied = False
         try:
             if "retention" in body:
                 adapter.put_object_retention(scope["bucket"], obj["key"], body["retention"], version_id)
+                applied = True
             if "legal_hold" in body:
                 adapter.put_object_legal_hold(scope["bucket"], obj["key"], body["legal_hold"], version_id)
+                applied = True
             readback = enhancements.get_retention(conn, adapter, bucket=scope["bucket"], key=obj["key"], version_id=version_id)
             enhancements._finish_intent(conn, intent_id, "succeeded", result=readback)
             conn.commit()
             return readback
         except Exception as exc:
-            enhancements._finish_intent(conn, intent_id, "failed", error=str(exc))
+            code = getattr(exc, "code", type(exc).__name__)
+            # Only a definite refusal of the first write proves nothing changed;
+            # a lost response, 5xx or failed readback leaves the outcome unknown.
+            state = "failed" if not applied and storage.is_known_rejection(exc) else "needs_review"
+            enhancements._finish_intent(conn, intent_id, state, error=f"{code}: {exc}")
             conn.commit()
+            if state == "needs_review":
+                raise AppError(
+                    "RETENTION_OUTCOME_UNKNOWN",
+                    "Retention/legal hold write outcome is unknown; inspect the object version before retrying.",
+                    502,
+                    detail={"intent_id": intent_id, "error_code": code},
+                ) from exc
             _raise(exc)
+
+
+def _require_object_lock(adapter: S3EnhancementAdapter, bucket: str) -> None:
+    try:
+        config = adapter.get_object_lock_configuration(bucket)
+    except storage.StorageError as exc:
+        if exc.code == "NOT_CONFIGURED":
+            raise AppError("OBJECT_LOCK_NOT_CONFIGURED", "Bucket has no object lock configuration; retention and legal hold cannot be written.", 409) from exc
+        if exc.code == "STORAGE_UNSUPPORTED":
+            raise AppError("UNSUPPORTED_CAPABILITY", "Storage does not support object lock.", 501) from exc
+        raise AppError("OBJECT_LOCK_UNKNOWN", "Cannot verify bucket object lock configuration.", 409, detail={"error_code": exc.code}) from exc
+    if config.get("ObjectLockEnabled") != "Enabled":
+        raise AppError("OBJECT_LOCK_NOT_CONFIGURED", "Bucket object lock is not enabled; retention and legal hold cannot be written.", 409)
 
 
 @router.get("/scopes/{scope_id}/owned-objects/trash-preview")

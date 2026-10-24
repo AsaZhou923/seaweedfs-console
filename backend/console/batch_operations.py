@@ -205,6 +205,9 @@ def execute_copy_batch(job: dict[str, Any], settings: Any) -> None:
 
 
 def _process_item(settings: Any, job: dict[str, Any], batch: dict[str, Any], item: dict[str, Any]) -> None:
+    # "planned" until the put is sent, "refused" when storage definitely rejected
+    # it, then "dispatched": from there an error leaves the target unverified.
+    stage = "planned"
     try:
         with db.connect(settings) as conn:
             source_scope = core.ensure_scope_permission(conn, item["source_scope_id"], "object:read")
@@ -244,6 +247,7 @@ def _process_item(settings: Any, job: dict[str, Any], batch: dict[str, Any], ite
             conn.commit()
 
         _assert_job_current(settings, job)
+        stage = "dispatched"
         try:
             target_client.put_object(
                 Bucket=target_scope["bucket"],
@@ -254,19 +258,22 @@ def _process_item(settings: Any, job: dict[str, Any], batch: dict[str, Any], ite
                 IfNoneMatch="*",
             )
         except Exception as exc:
+            # 412 means the target already exists, possibly from our own earlier
+            # attempt; ownership metadata and bytes are verified below.
             if _status_from_exception(exc) != 412:
-                raise storage.sanitize_storage_exception(exc) from exc
+                error = storage.sanitize_storage_exception(exc)
+                if storage.is_known_rejection(error):
+                    stage = "refused"
+                raise error from exc
 
         result = _verify_target(target_client, target_scope, item["target_key"], expected_sha, metadata)
         if result["status"] != "confirmed":
             _finish_item(settings, job, item, result["status"], error_code="COPY_TARGET_NEEDS_REVIEW", result=result)
             return
         _finish_confirmed_item(settings, job, item, target_scope, result, expected_sha, content_type)
-    except AppError as exc:
-        _finish_item(settings, job, item, "failed", error_code=exc.code, result={"message": str(exc)})
-    except storage.StorageError as exc:
-        phase = "needs_review" if exc.status >= 500 else "failed"
-        _finish_item(settings, job, item, phase, error_code=exc.code, result={"message": str(exc)})
+    except (AppError, storage.StorageError) as exc:
+        phase = "needs_review" if stage == "dispatched" else "failed"
+        _finish_item(settings, job, item, phase, error_code=exc.code, result={"message": str(exc), "stage": stage})
 
 
 def _verify_target(target_client: Any, target_scope: dict[str, Any], target_key: str, expected_sha: str, metadata: dict[str, str]) -> dict[str, Any]:

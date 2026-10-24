@@ -306,6 +306,64 @@ def test_copy_rejects_corrupt_same_size_target_readback(conn):
         )
 
 
+class StatusError(Exception):
+    def __init__(self, status, code):
+        super().__init__(code)
+        self.status = status
+        self.code = code
+
+
+def _copy_intent_status(conn):
+    return conn.execute("SELECT status, error FROM operation_intents WHERE operation_type='object.copy' ORDER BY rowid DESC LIMIT 1").fetchone()
+
+
+def _copy(conn, adapter):
+    return enh.copy_object_safely(conn, adapter, scope_id="s1", source_bucket="b", source_key="source", source_version_id="v1", target_bucket="b", target_key="copy")
+
+
+def test_copy_put_precondition_failure_is_terminal_target_exists(conn):
+    class ExistingTargetAdapter(FakeAdapter):
+        def put_object(self, bucket, key, data, metadata, content_type):
+            raise StatusError(412, "STORAGE_PRECONDITION_FAILED")
+
+    with pytest.raises(enh.TargetExists):
+        _copy(conn, ExistingTargetAdapter())
+
+    status, error = _copy_intent_status(conn)
+    assert status == "failed"
+    assert error.startswith("TARGET_EXISTS")
+
+
+@pytest.mark.parametrize(("status", "expected"), [(403, "failed"), (503, "needs_review"), (408, "needs_review")])
+def test_copy_put_failure_is_failed_only_for_definite_refusal(conn, status, expected):
+    class FailingPutAdapter(FakeAdapter):
+        def put_object(self, bucket, key, data, metadata, content_type):
+            raise StatusError(status, "STORAGE_ERROR")
+
+    with pytest.raises(StatusError):
+        _copy(conn, FailingPutAdapter())
+
+    assert _copy_intent_status(conn)[0] == expected
+
+
+def test_copy_failure_before_dispatch_is_failed_and_after_dispatch_needs_review(conn):
+    class SourceGoneAdapter(FakeAdapter):
+        def get_object_bytes_if_match(self, bucket, key, version_id, etag):
+            raise StatusError(503, "STORAGE_UNAVAILABLE")
+
+    with pytest.raises(StatusError):
+        _copy(conn, SourceGoneAdapter())
+    assert _copy_intent_status(conn)[0] == "failed"
+
+    class CorruptingAdapter(FakeAdapter):
+        def put_object(self, bucket, key, data, metadata, content_type):
+            super().put_object(bucket, key, b"X" + data[1:], metadata, content_type)
+
+    with pytest.raises(enh.ConflictError):
+        _copy(conn, CorruptingAdapter())
+    assert _copy_intent_status(conn)[0] == "needs_review"
+
+
 def test_restore_version_writes_new_target_only(conn):
     adapter = FakeAdapter()
     result = enh.restore_object_version(conn, adapter, scope_id="s1", bucket="b", key="source", version_id="v1", target_key="restored")
