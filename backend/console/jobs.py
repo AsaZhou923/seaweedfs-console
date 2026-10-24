@@ -145,6 +145,16 @@ def checkpoint(conn, job: dict, *, state="queued", processed=None, errors=None, 
                       "partial" if errors else "complete" if state == "succeeded" else "unknown", now(), job["id"]))
 
 
+def error_code(exc: BaseException) -> str:
+    """Keep the typed error code so operators can tell storage failures apart."""
+    from .enhancements import EnhancementError
+    from .security import AppError
+    from .storage import StorageError
+    if isinstance(exc, (AppError, StorageError, EnhancementError)) and isinstance(exc.code, str) and exc.code:
+        return exc.code
+    return "WORKER_FAILURE"
+
+
 def run_once(settings=None) -> bool:
     from . import db, catalog
     from .config import get_settings
@@ -161,8 +171,7 @@ def run_once(settings=None) -> bool:
         else:
             raise RuntimeError("UNKNOWN_JOB_KIND")
     except Exception as exc:
-        from .security import AppError
-        code = exc.code if isinstance(exc, AppError) else "WORKER_FAILURE"
+        code = error_code(exc)
         with db.connect(settings) as conn:
             try:
                 checkpoint(conn, job, state="needs_review" if job["effect_class"] == "remote_mutating" else "failed", error_code=code)

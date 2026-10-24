@@ -459,11 +459,15 @@ def _job_by_id(conn, job_id: str | None) -> dict[str, Any] | None:
     return jobs.public(dict(row)) if row else None
 
 
+TERMINAL_JOB_STATES = {"succeeded", "failed", "partially_failed", "cancelled", "needs_review"}
+
+
 def _batch_public(conn, batch: Mapping[str, Any]) -> dict[str, Any]:
     items = []
     counts: dict[str, int] = {}
     for item in batch["items"]:
         current = dict(item)
+        current["job"] = _job_by_id(conn, current.get("job_id"))
         variant_id = current.get("variant_id")
         if variant_id:
             try:
@@ -472,10 +476,31 @@ def _batch_public(conn, batch: Mapping[str, Any]) -> dict[str, Any]:
                 current["state"] = variant["status"]
             except Exception:
                 current["state"] = "unknown"
-        current["job"] = _job_by_id(conn, current.get("job_id"))
+        job_state = (current["job"] or {}).get("state")
+        if current.get("state") == "planned" and job_state in TERMINAL_JOB_STATES:
+            # Rows written before the worker recorded variant failures stay
+            # "planned"; the terminal job is the stronger evidence.
+            current["state"] = job_state
         counts[current.get("state", "planned")] = counts.get(current.get("state", "planned"), 0) + 1
         items.append(current)
-    return dict(batch) | {"items": items, "counts": counts, "known_count": len(items)}
+    return dict(batch) | {"status": _batch_status(batch["status"], items), "items": items, "counts": counts, "known_count": len(items)}
+
+
+def _batch_status(stored: str, items: list[Mapping[str, Any]]) -> str:
+    """Derive the batch status from its items once planning has finished."""
+    if stored == "planning" or not items:
+        return stored
+    job_states = [(item.get("job") or {}).get("state") for item in items]
+    if any(state not in TERMINAL_JOB_STATES for state in job_states):
+        return "queued" if all(state == "queued" for state in job_states) else "running"
+    states = {item.get("state") for item in items}
+    if states == {"succeeded"}:
+        return "succeeded"
+    if "needs_review" in states or "unknown" in states:
+        return "needs_review"
+    if "succeeded" in states:
+        return "partially_failed"
+    return "failed"
 
 
 def _raise(exc: Exception) -> None:
@@ -633,102 +658,155 @@ def submit_derived_variant_batch(request: Request, scope_id: str, body: dict[str
     output_scope_id = body.get("output_scope_id") or scope_id
     object_ids = list(body.get("object_ids") or [])
     preset_ids = list(body.get("preset_ids") or [])
-    if not object_ids or not preset_ids:
-        raise AppError("INVALID_BATCH", "object_ids and preset_ids are required.", 422)
-    planned_count = len(object_ids) * len(preset_ids)
-    if planned_count > 200:
-        raise AppError("BATCH_TOO_LARGE", "derived variant batch is limited to 200 target pairs.", 422)
+    snapshot_id = body.get("snapshot_id")
+    if object_ids and snapshot_id:
+        raise AppError("INVALID_BATCH", "Send either object_ids or snapshot_id, not both.", 422)
+    if (not object_ids and not snapshot_id) or not preset_ids:
+        raise AppError("INVALID_BATCH", "object_ids or snapshot_id, and preset_ids, are required.", 422)
+    output_prefix = body.get("output_prefix", "derived/")
+    if not isinstance(output_prefix, str):
+        raise AppError("INVALID_BATCH", "output_prefix must be a string.", 422)
     idempotency_key = request.headers.get("Idempotency-Key") or body.get("idempotency_key")
     if not idempotency_key:
         raise AppError("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key or idempotency_key is required for derived batches.", 400)
     with db.connect(request.app.state.settings) as conn:
         enhancements.initialize(conn)
-        output_scope = core.ensure_scope_permission(conn, output_scope_id, "object:write")
-        if output_scope["project_id"] != scope["project_id"]:
-            raise AppError("FORBIDDEN_SCOPE", "output_scope_id must belong to the same project.", 403)
-        preset_rows = {
-            row["id"]: row
-            for row in conn.execute(
-                "SELECT id, project_id, name, version, params_json FROM enhancement_presets WHERE id IN (%s)" % ",".join("?" for _ in preset_ids),
-                preset_ids,
-            ).fetchall()
-        }
-        if len(preset_rows) != len(set(preset_ids)) or any(row["project_id"] != scope["project_id"] for row in preset_rows.values()):
-            raise AppError("PRESET_NOT_FOUND", "all presets must exist in the current project.", 404)
-        sources = []
-        for object_id in object_ids:
-            source = core.get_object(conn, scope_id, object_id)
-            sources.append(source)
-        target_map = {(item["object_id"], item["preset_id"]): item["output_key"] for item in body.get("targets", [])}
-        items = []
-        for source in sources:
-            for preset_id in preset_ids:
-                preset_params = json.loads(preset_rows[preset_id]["params_json"])
-                output_key = target_map.get((source["id"], preset_id))
-                if not output_key:
-                    seed = enhancements.sha256_text(enhancements.canonical_json({"object_id": source["id"], "source_revision": source["revision"], "preset_id": preset_id, "output_scope_id": output_scope_id}))
-                    output_key = f"{body.get('output_prefix', 'derived').strip('/')}/{seed[:32]}.{preset_params['format']}"
-                core.assert_key_in_scope(output_scope, output_key)
-                items.append(
-                    {
-                        "object_id": source["id"],
-                        "source_revision": source["revision"],
-                        "preset_id": preset_id,
-                        "preset_version": preset_rows[preset_id]["version"],
-                        "output_scope_id": output_scope_id,
-                        "output_key": output_key,
-                        "state": "planned",
-                    }
-                )
+        # One write transaction covers the batch row, every variant and every
+        # job, so an interrupted request never leaves an empty batch behind.
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            existing, _request_hash = enhancements.create_or_get_batch(
-                conn,
-                scope_id=scope_id,
-                project_id=scope["project_id"],
-                idempotency_key=idempotency_key,
-                request_body=body,
-                planned_count=planned_count,
-                items=items,
-            )
-            if existing:
-                return _batch_public(conn, existing)
-            batch_row = conn.execute("SELECT * FROM derived_variant_batches WHERE scope_id=? AND idempotency_key=?", (scope_id, idempotency_key)).fetchone()
-            batch_id = batch_row["id"]
-            queued = []
-            for item in items:
-                variant = enhancements.create_derived_variant_intent(
-                    conn,
-                    project_id=scope["project_id"],
-                    scope_id=scope_id,
-                    source_object_id=item["object_id"],
-                    source_revision=item["source_revision"],
-                    preset_id=item["preset_id"],
-                    output_scope_id=output_scope_id,
-                    output_bucket=output_scope["bucket"],
-                    output_key=item["output_key"],
-                    actor_id=user.id,
-                )
-                job = jobs.submit_job(
-                    conn,
-                    scope_id,
-                    "derived_variant",
-                    {"variant_id": variant["id"], "source_revision": item["source_revision"]},
-                    actor=user.id,
-                    idempotency_key=f"{batch_id}:{item['object_id']}:{item['preset_id']}",
-                    effect_class="remote_mutating",
-                )
-                queued.append(dict(item) | {"variant_id": variant["id"], "job_id": job["id"], "state": variant["status"]})
-            batch = enhancements.update_batch_items(conn, batch_id, status="queued", items=queued)
-            conn.commit()
-            return _batch_public(conn, batch)
+            batch = enhancements.find_batch(conn, scope_id=scope_id, idempotency_key=idempotency_key, request_body=body)
+            if batch is not None and batch["status"] != "planning":
+                conn.rollback()
+                return _batch_public(conn, batch)
+            return _plan_derived_batch(conn, user, scope, body, batch, object_ids, preset_ids, str(snapshot_id) if snapshot_id else None, output_scope_id, output_prefix, idempotency_key)
         except Exception as exc:
+            conn.rollback()
             _raise(exc)
+
+
+def _plan_derived_batch(
+    conn,
+    user: Any,
+    scope: Mapping[str, Any],
+    body: dict[str, Any],
+    batch: dict[str, Any] | None,
+    object_ids: list[str],
+    preset_ids: list[str],
+    snapshot_id: str | None,
+    output_scope_id: str,
+    output_prefix: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    scope_id = scope["id"]
+    snapshot_revisions: dict[str, str] = {}
+    if snapshot_id:
+        snapshot_revisions = _snapshot_revisions(conn, scope, user.id, snapshot_id)
+        object_ids = list(snapshot_revisions)
+    planned_count = len(object_ids) * len(preset_ids)
+    if planned_count > 200:
+        raise AppError("BATCH_TOO_LARGE", "derived variant batch is limited to 200 target pairs.", 422)
+    output_scope = core.ensure_scope_permission(conn, output_scope_id, "object:write")
+    if output_scope["project_id"] != scope["project_id"]:
+        raise AppError("FORBIDDEN_SCOPE", "output_scope_id must belong to the same project.", 403)
+    preset_rows = {
+        row["id"]: row
+        for row in conn.execute(
+            "SELECT id, project_id, name, version, params_json FROM enhancement_presets WHERE id IN (%s)" % ",".join("?" for _ in preset_ids),
+            preset_ids,
+        ).fetchall()
+    }
+    if len(preset_rows) != len(set(preset_ids)) or any(row["project_id"] != scope["project_id"] for row in preset_rows.values()):
+        raise AppError("PRESET_NOT_FOUND", "all presets must exist in the current project.", 404)
+    sources = []
+    for object_id in object_ids:
+        source = core.get_object(conn, scope_id, object_id)
+        if snapshot_id and source["revision"] != snapshot_revisions[object_id]:
+            raise AppError("OBJECT_REVISION_CHANGED", "A snapshot object changed after the snapshot was pinned.", 409, field="snapshot_id")
+        sources.append(source)
+    target_map = {(item["object_id"], item["preset_id"]): item["output_key"] for item in body.get("targets", [])}
+    items = []
+    for source in sources:
+        for preset_id in preset_ids:
+            preset_params = json.loads(preset_rows[preset_id]["params_json"])
+            output_key = target_map.get((source["id"], preset_id))
+            if not output_key:
+                seed = enhancements.sha256_text(enhancements.canonical_json({"object_id": source["id"], "source_revision": source["revision"], "preset_id": preset_id, "output_scope_id": output_scope_id}))
+                # Scope prefixes and output_prefix are literal; never add or strip slashes.
+                output_key = f"{output_scope['prefix']}{output_prefix}{seed[:32]}.{preset_params['format']}"
+            core.assert_key_in_scope(output_scope, output_key)
+            items.append(
+                {
+                    "object_id": source["id"],
+                    "source_revision": source["revision"],
+                    "preset_id": preset_id,
+                    "preset_version": preset_rows[preset_id]["version"],
+                    "output_scope_id": output_scope_id,
+                    "output_key": output_key,
+                    "state": "planned",
+                }
+            )
+    if batch is None:
+        batch = enhancements.create_batch(
+            conn,
+            scope_id=scope_id,
+            project_id=scope["project_id"],
+            idempotency_key=idempotency_key,
+            request_body=body,
+            planned_count=planned_count,
+            items=items,
+        )
+    batch_id = batch["id"]
+    queued = []
+    for item in items:
+        variant_id = enhancements.plan_derived_variant(
+            conn,
+            project_id=scope["project_id"],
+            scope_id=scope_id,
+            source_object_id=item["object_id"],
+            source_revision=item["source_revision"],
+            preset_id=item["preset_id"],
+            output_scope_id=output_scope_id,
+            output_bucket=output_scope["bucket"],
+            output_key=item["output_key"],
+            actor_id=user.id,
+        )
+        variant = enhancements.get_derived_variant(conn, variant_id)
+        job = jobs.submit_job(
+            conn,
+            scope_id,
+            "derived_variant",
+            {"variant_id": variant["id"], "source_revision": item["source_revision"]},
+            actor=user.id,
+            idempotency_key=f"{batch_id}:{item['object_id']}:{item['preset_id']}",
+            effect_class="remote_mutating",
+        )
+        queued.append(dict(item) | {"variant_id": variant["id"], "job_id": job["id"], "state": variant["status"]})
+    batch = enhancements.update_batch_items(conn, batch_id, status="queued", items=queued)
+    conn.commit()
+    return _batch_public(conn, batch)
+
+
+def _snapshot_revisions(conn, scope: Mapping[str, Any], actor: str, snapshot_id: str) -> dict[str, str]:
+    """Resolve a pinned operation snapshot into ``{object_id: revision}``."""
+    row = conn.execute("SELECT * FROM operation_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+    if not row or row["scope_id"] != scope["id"] or row["actor"] != actor:
+        raise AppError("SNAPSHOT_NOT_FOUND", "Snapshot was not found in this scope.", 404, field="snapshot_id")
+    if row["authz_epoch"] != scope["authz_epoch"]:
+        raise AppError("SNAPSHOT_STALE", "Scope authorization changed after the snapshot was pinned.", 409, field="snapshot_id")
+    if row["expires_at"] <= jobs.now():
+        raise AppError("SNAPSHOT_EXPIRED", "Snapshot has expired; pin a new one.", 409, field="snapshot_id")
+    revisions = {item["object_id"]: item["revision"] for item in json.loads(row["items_json"])}
+    if not revisions:
+        raise AppError("INVALID_BATCH", "Snapshot contains no objects.", 422, field="snapshot_id")
+    return revisions
 
 
 @router.get("/scopes/{scope_id}/derived-variant-batches/{batch_id}")
 def get_derived_variant_batch(request: Request, scope_id: str, batch_id: str):
     _require_scope(request, scope_id)
     with db.connect(request.app.state.settings) as conn:
+        enhancements.initialize(conn)
         try:
             batch = enhancements.get_derived_batch(conn, batch_id)
             if batch["scope_id"] != scope_id:
@@ -1404,6 +1482,41 @@ def capacity_thresholds(request: Request, scope_id: str, body: dict[str, Any]):
 
 
 def execute_variant_job(job: dict[str, Any], settings: Any) -> None:
+    phase = {"dispatched": False}
+    try:
+        _execute_variant_job(job, settings, phase)
+    except Exception as exc:
+        _record_variant_failure(settings, job, exc, dispatched=phase["dispatched"])
+        raise
+
+
+def _record_variant_failure(settings: Any, job: Mapping[str, Any], exc: Exception, *, dispatched: bool) -> None:
+    """Move a still-planned variant to a terminal state when its job fails.
+
+    Before the dispatch checkpoint no remote write can have happened, so the
+    variant failed; after it the output may exist and needs review.
+    """
+    code = jobs.error_code(exc)
+    state = "needs_review" if dispatched else "failed"
+    try:
+        variant_id = json.loads(job["params_json"])["variant_id"]
+        with db.connect(settings) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            jobs.fenced(conn, dict(job))
+            row = conn.execute("SELECT manifest_json FROM derived_variants WHERE id=? AND status='planned'", (variant_id,)).fetchone()
+            if row:
+                manifest = json.loads(row["manifest_json"]) | {"status": state, "error_code": code}
+                conn.execute(
+                    "UPDATE derived_variants SET status=?, manifest_json=?, last_error=?, updated_at=? WHERE id=? AND status='planned'",
+                    (state, enhancements.canonical_json(manifest), code, jobs.now(), variant_id),
+                )
+            conn.commit()
+    except Exception:
+        # A superseded executor or an unreadable job must not mask the original error.
+        pass
+
+
+def _execute_variant_job(job: dict[str, Any], settings: Any, phase: dict[str, bool]) -> None:
     params = json.loads(job["params_json"])
     with db.connect(settings) as conn:
         enhancements.initialize(conn)
@@ -1446,6 +1559,7 @@ def execute_variant_job(job: dict[str, Any], settings: Any) -> None:
         )
         jobs.checkpoint(conn, job, state="running", processed=0, errors=0, data={"phase": "dispatch", "variant_id": variant["id"], "intent_id": intent_id})
         conn.commit()
+    phase["dispatched"] = True
 
     target = _head_or_none(output_adapter, output_scope["bucket"], variant["output_key"])
     if target is not None:

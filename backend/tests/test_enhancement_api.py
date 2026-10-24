@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.console import core, db, enhancement_api, enhancements, jobs
+from backend.console import catalog, core, db, enhancement_api, enhancements, jobs
 from backend.console.security import AppError
 
 
@@ -290,7 +290,7 @@ def test_execute_variant_job_rejects_changed_source(settings, monkeypatch):
         enhancement_api.execute_variant_job(job, settings)
 
 
-def test_derived_variant_batch_plans_two_by_two_and_reuses_idempotency(settings, monkeypatch):
+def _setup_batch(settings, monkeypatch, *, key="batch-key"):
     setup_variant(settings)
     with db.connect(settings) as conn:
         now = jobs.now()
@@ -301,6 +301,10 @@ def test_derived_variant_batch_plans_two_by_two_and_reuses_idempotency(settings,
             "INSERT INTO objects(id,asset_id,scope_id,key,revision,size,etag,first_seen_at,observed_at,properties_json,content_type,checksum) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             ("o2", "a2", "s", "in2.jpg", revision, 7, '"source2-etag"', now, now, "{}", "image/jpeg", checksum),
         )
+        conn.execute(
+            "INSERT INTO scopes(id,project_id,connection_id,display_name,bucket,prefix,writable,manage_bucket,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("out", "p", "con", "output", "bucket", "allowed/", 1, 0, now, now),
+        )
         preset2 = enhancements.create_preset(
             conn,
             project_id="p",
@@ -310,22 +314,250 @@ def test_derived_variant_batch_plans_two_by_two_and_reuses_idempotency(settings,
         preset_ids = [row["id"] for row in conn.execute("SELECT id FROM enhancement_presets ORDER BY created_at").fetchall()]
         assert preset2["id"] in preset_ids
         conn.commit()
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), state=SimpleNamespace(user=SimpleNamespace(id="admin")), headers={"Idempotency-Key": "batch-key"}, cookies={}, base_url="http://testserver/")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), state=SimpleNamespace(user=SimpleNamespace(id="admin")), headers={"Idempotency-Key": key}, cookies={}, base_url="http://testserver/")
     monkeypatch.setattr(enhancement_api, "mutation", lambda request: SimpleNamespace(id="admin"))
     monkeypatch.setattr(enhancement_api, "_require_scope", lambda request, scope_id, write=False, manage_bucket=False: core.ensure_scope_permission(db.connect(settings), scope_id, "object:read"))
+    return request, preset_ids
 
-    body = {"object_ids": ["o", "o2"], "preset_ids": preset_ids, "output_scope_id": "s", "output_prefix": "batch"}
+
+def _count(settings, sql):
+    with db.connect(settings) as conn:
+        return conn.execute(sql).fetchone()[0]
+
+
+def test_derived_variant_batch_plans_two_by_two_and_reuses_idempotency(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+
+    body = {"object_ids": ["o", "o2"], "preset_ids": preset_ids, "output_scope_id": "s", "output_prefix": "batch/"}
     first = enhancement_api.submit_derived_variant_batch(request, "s", body)
     second = enhancement_api.submit_derived_variant_batch(request, "s", body)
 
     assert first["planned_count"] == 4
     assert len(first["items"]) == 4
     assert first["id"] == second["id"]
+    assert first["status"] == second["status"] == "queued"
     assert {item["job"]["kind"] for item in first["items"]} == {"derived_variant"}
     assert all(item["source_revision"] for item in first["items"])
     assert all(item["output_key"].startswith("batch/") for item in first["items"])
+    assert _count(settings, "SELECT COUNT(*) FROM jobs WHERE kind='derived_variant'") == 5  # setup fixture job + 4 batch jobs
+
+
+def test_derived_variant_batch_default_key_uses_output_scope_prefix_literally(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+
+    default = enhancement_api.submit_derived_variant_batch(request, "s", {"object_ids": ["o"], "preset_ids": preset_ids, "output_scope_id": "out"})
+    request.headers = {"Idempotency-Key": "literal-prefix"}
+    literal = enhancement_api.submit_derived_variant_batch(request, "s", {"object_ids": ["o"], "preset_ids": preset_ids[:1], "output_scope_id": "out", "output_prefix": "thumbs-"})
+
+    assert all(item["output_key"].startswith("allowed/derived/") for item in default["items"])
+    assert all(item["variant"]["output_key"] == item["output_key"] for item in default["items"])
+    assert literal["items"][0]["output_key"].startswith("allowed/thumbs-")
+    assert "/" not in literal["items"][0]["output_key"][len("allowed/thumbs-"):]
+
+
+def _pin_snapshot(settings, snapshot_id, items, *, scope_id="s", actor="admin", epoch=1, expires_at=None):
     with db.connect(settings) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM jobs WHERE kind='derived_variant'").fetchone()[0] == 5  # setup fixture job + 4 batch jobs
+        catalog.initialize(conn)
+        conn.execute(
+            "INSERT INTO operation_snapshots VALUES(?,?,?,?,?,?,?,?)",
+            (snapshot_id, scope_id, actor, epoch, "{}", json.dumps(items), jobs.now(), expires_at or "9999-12-31T00:00:00.000000Z"),
+        )
+        conn.commit()
+
+
+def test_derived_variant_batch_resolves_pinned_snapshot(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    with db.connect(settings) as conn:
+        revisions = {row["id"]: row["revision"] for row in conn.execute("SELECT id, revision FROM objects")}
+    _pin_snapshot(settings, "snap", [{"object_id": "o", "revision": revisions["o"]}, {"object_id": "o2", "revision": revisions["o2"]}])
+
+    batch = enhancement_api.submit_derived_variant_batch(request, "s", {"snapshot_id": "snap", "preset_ids": preset_ids[:1]})
+
+    assert batch["planned_count"] == 2
+    assert {item["object_id"] for item in batch["items"]} == {"o", "o2"}
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "code"),
+    [
+        ({"scope_id": "out"}, "SNAPSHOT_NOT_FOUND"),
+        ({"actor": "someone-else"}, "SNAPSHOT_NOT_FOUND"),
+        ({"epoch": 0}, "SNAPSHOT_STALE"),
+        ({"expires_at": "2000-01-01T00:00:00.000000Z"}, "SNAPSHOT_EXPIRED"),
+        ({"revision": "stale-revision"}, "OBJECT_REVISION_CHANGED"),
+    ],
+)
+def test_derived_variant_batch_rejects_unusable_snapshot_without_side_effects(settings, monkeypatch, snapshot, code):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    with db.connect(settings) as conn:
+        revision = conn.execute("SELECT revision FROM objects WHERE id='o'").fetchone()[0]
+    options = {key: value for key, value in snapshot.items() if key != "revision"}
+    _pin_snapshot(settings, "snap", [{"object_id": "o", "revision": snapshot.get("revision", revision)}], **options)
+
+    with pytest.raises(AppError) as error:
+        enhancement_api.submit_derived_variant_batch(request, "s", {"snapshot_id": "snap", "preset_ids": preset_ids})
+
+    assert error.value.code == code
+    assert _count(settings, "SELECT COUNT(*) FROM derived_variant_batches") == 0
+    assert _count(settings, "SELECT COUNT(*) FROM jobs") == 1
+
+
+def test_derived_variant_batch_rolls_back_partial_planning_and_replay_succeeds(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    body = {"object_ids": ["o", "o2"], "preset_ids": preset_ids}
+    real_submit = jobs.submit_job
+    calls = {"count": 0}
+
+    def flaky_submit(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(enhancement_api.jobs, "submit_job", flaky_submit)
+    with pytest.raises(sqlite3.OperationalError):
+        enhancement_api.submit_derived_variant_batch(request, "s", body)
+
+    assert _count(settings, "SELECT COUNT(*) FROM derived_variant_batches") == 0
+    assert _count(settings, "SELECT COUNT(*) FROM derived_variants") == 1  # setup fixture only
+    assert _count(settings, "SELECT COUNT(*) FROM jobs") == 1
+
+    monkeypatch.setattr(enhancement_api.jobs, "submit_job", real_submit)
+    batch = enhancement_api.submit_derived_variant_batch(request, "s", body)
+    assert batch["status"] == "queued"
+    assert len({item["job_id"] for item in batch["items"]}) == 4
+
+
+def test_derived_variant_batch_replay_resumes_legacy_planning_batch(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    body = {"object_ids": ["o"], "preset_ids": preset_ids}
+    with db.connect(settings) as conn:
+        now = jobs.now()
+        conn.execute(
+            "INSERT INTO derived_variant_batches(id,scope_id,project_id,request_hash,idempotency_key,status,planned_count,items_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("batch_legacy", "s", "p", enhancements.sha256_text(enhancements.canonical_json(body)), "batch-key", "planning", 2, "[]", now, now),
+        )
+        conn.commit()
+
+    batch = enhancement_api.submit_derived_variant_batch(request, "s", body)
+
+    assert batch["id"] == "batch_legacy"
+    assert batch["status"] == "queued"
+    assert len(batch["items"]) == 2
+    assert all(item["job_id"] and item["variant_id"] for item in batch["items"])
+
+
+def test_derived_variant_batch_status_follows_items(settings, monkeypatch):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    batch = enhancement_api.submit_derived_variant_batch(request, "s", {"object_ids": ["o", "o2"], "preset_ids": preset_ids[:1]})
+    first, second = batch["items"]
+
+    def read():
+        with db.connect(settings) as conn:
+            return enhancement_api._batch_public(conn, enhancements.get_derived_batch(conn, batch["id"]))
+
+    def set_state(item, job_state, variant_state):
+        with db.connect(settings) as conn:
+            conn.execute("UPDATE jobs SET state=? WHERE id=?", (job_state, item["job_id"]))
+            conn.execute("UPDATE derived_variants SET status=? WHERE id=?", (variant_state, item["variant_id"]))
+            conn.commit()
+
+    assert read()["status"] == "queued"
+    set_state(first, "running", "planned")
+    assert read()["status"] == "running"
+    set_state(first, "succeeded", "succeeded")
+    set_state(second, "succeeded", "succeeded")
+    current = read()
+    assert current["status"] == "succeeded"
+    assert current["counts"] == {"succeeded": 2}
+
+    # A terminal job whose variant row was never updated is reported by job state.
+    set_state(second, "needs_review", "planned")
+    current = read()
+    assert current["status"] == "needs_review"
+    assert current["counts"] == {"succeeded": 1, "needs_review": 1}
+
+    set_state(second, "needs_review", "failed")
+    assert read()["status"] == "partially_failed"
+    set_state(first, "needs_review", "failed")
+    assert read()["status"] == "failed"
+
+
+def test_execute_variant_job_records_post_dispatch_storage_failure(settings, monkeypatch):
+    variant, job = setup_variant(settings)
+    fake = FakeS3()
+
+    def broken_put(**kwargs):
+        raise FakeClientError(500)
+
+    fake.put_object = broken_put
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda conn, settings, scope: enhancement_api.S3EnhancementAdapter(fake))
+
+    with pytest.raises(enhancement_api.storage.StorageError):
+        enhancement_api.execute_variant_job(job, settings)
+
+    with db.connect(settings) as conn:
+        stored = enhancements.get_derived_variant(conn, variant["id"])
+    assert stored["status"] == "needs_review"
+    assert stored["last_error"] == "STORAGE_UNAVAILABLE"
+    assert stored["manifest"]["status"] == "needs_review"
+
+
+def test_execute_variant_job_marks_variant_failed_before_dispatch(settings, monkeypatch):
+    variant, job = setup_variant(settings)
+    fake = FakeS3()
+    fake.objects[("bucket", "in.jpg")]["ETag"] = '"changed"'
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda conn, settings, scope: enhancement_api.S3EnhancementAdapter(fake))
+
+    with pytest.raises(AppError):
+        enhancement_api.execute_variant_job(job, settings)
+
+    with db.connect(settings) as conn:
+        stored = enhancements.get_derived_variant(conn, variant["id"])
+    assert stored["status"] == "failed"
+    assert stored["last_error"] == "OBJECT_REVISION_CHANGED"
+
+
+def test_execute_variant_job_failure_does_not_write_after_lease_loss(settings, monkeypatch):
+    variant, job = setup_variant(settings)
+    fake = FakeS3()
+    fake.objects[("bucket", "in.jpg")]["ETag"] = '"changed"'
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda conn, settings, scope: enhancement_api.S3EnhancementAdapter(fake))
+    real_assert = enhancement_api._assert_job_current
+
+    def lose_lease(settings, current):
+        real_assert(settings, current)
+        with db.connect(settings) as conn:
+            conn.execute("UPDATE jobs SET fencing_version=fencing_version+1 WHERE id=?", (current["id"],))
+            conn.commit()
+
+    monkeypatch.setattr(enhancement_api, "_assert_job_current", lose_lease)
+
+    with pytest.raises(AppError):
+        enhancement_api.execute_variant_job(job, settings)
+
+    with db.connect(settings) as conn:
+        stored = enhancements.get_derived_variant(conn, variant["id"])
+    assert stored["status"] == "planned"
+    assert stored["last_error"] is None
+
+
+def test_run_once_preserves_storage_error_code(settings, monkeypatch):
+    _variant, job = setup_variant(settings)
+    with db.connect(settings) as conn:
+        conn.execute("UPDATE jobs SET state='queued', lease_token=NULL, lease_expires_at=NULL WHERE id=?", (job["id"],))
+        conn.commit()
+
+    def storage_failure(job, settings):
+        raise enhancement_api.storage.StorageError("STORAGE_FORBIDDEN", "Storage denied the request.", 403)
+
+    monkeypatch.setitem(jobs.HANDLERS, "derived_variant", storage_failure)
+
+    assert jobs.run_once(settings) is True
+    with db.connect(settings) as conn:
+        row = conn.execute("SELECT state, error_code FROM jobs WHERE id=?", (job["id"],)).fetchone()
+    assert dict(row) == {"state": "needs_review", "error_code": "STORAGE_FORBIDDEN"}
+    assert jobs.error_code(RuntimeError("boom")) == "WORKER_FAILURE"
 
 
 def test_copy_object_only_treats_404_as_missing_target():

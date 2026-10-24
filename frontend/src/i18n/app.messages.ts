@@ -240,7 +240,7 @@ export const appMessages: Record<string, Message> = {
   "每行一个 object_id，可由资产页“生成派生”带入": { en: "One object_id per line; can be loaded from Generate variants on the Assets page", "zh-CN": "每行一个 object_id，可由资产页“生成派生”带入" },
   "批量全查询时使用固定快照": { en: "Use a pinned snapshot for full-query batches", "zh-CN": "批量全查询时使用固定快照" },
   "批量 preset": { en: "Batch presets", "zh-CN": "批量 preset" },
-  "可选，重试时复用": { en: "Optional; reuse when retrying", "zh-CN": "可选，重试时复用" },
+  "留空时自动生成，重试时复用": { en: "Generated when left empty; reused when retrying", "zh-CN": "留空时自动生成，重试时复用" },
   "对象来源": { en: "Object source", "zh-CN": "对象来源" },
   "Preset 数": { en: "Preset count", "zh-CN": "Preset 数" },
   "预计任务": { en: "Estimated jobs", "zh-CN": "预计任务" },

@@ -1322,7 +1322,7 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
 
   useEffect(() => {
     if (initialObjectIds.length) {
-      setDerive((old) => ({ ...old, object_ids: initialObjectIds.join("\n"), snapshot_id: "" }));
+      setDerive((old) => ({ ...old, object_ids: initialObjectIds.join("\n"), snapshot_id: "", idempotency_key: "" }));
       setHandoffOpen(true);
     }
   }, [initialObjectIds.join("|")]);
@@ -1334,14 +1334,20 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
   const plannedBatchCount = (batchObjectIds.length || (derive.snapshot_id ? 1 : 0)) * selectedPresetIds.length;
 
   function submitBatch() {
+    // The backend requires a key; keep the generated one so a retry replays the same batch.
+    const idempotencyKey = derive.idempotency_key.trim() || randomIntentKey();
+    if (idempotencyKey !== derive.idempotency_key) setDerive((old) => ({ ...old, idempotency_key: idempotencyKey }));
     const body = {
       object_ids: batchObjectIds.length ? batchObjectIds : undefined,
       snapshot_id: batchObjectIds.length ? undefined : derive.snapshot_id || undefined,
       preset_ids: selectedPresetIds,
-      output_scope_id: derive.output_scope_id || undefined,
-      idempotency_key: derive.idempotency_key || undefined
+      output_scope_id: derive.output_scope_id || undefined
     };
-    return request(`/scopes/${scopeId}/derived-variant-batches`, { method: "POST", body: JSON.stringify(body) });
+    return request(`/scopes/${scopeId}/derived-variant-batches`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(body) });
+  }
+
+  function applyBatchResult(value: any) {
+    if (typeof value?.id === "string") setDerive((old) => ({ ...old, batch_id: value.id }));
   }
 
   return (
@@ -1377,23 +1383,23 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
         <label className="field">{t("对象 ID")}<input value={derive.object_id} onChange={(event) => setDerive({ ...derive, object_id: event.target.value })} /></label>
         <label className="field">{t("Preset")}<select value={derive.preset_id} onChange={(event) => setDerive({ ...derive, preset_id: event.target.value })}>{items.map((item) => <option key={item.id} value={item.id}>{item.name} v{item.version}</option>)}</select></label>
         <label className="field">{t("输出 Key")}<input value={derive.output_key} onChange={(event) => setDerive({ ...derive, output_key: event.target.value })} /></label>
-        <label className="field">{t("输出 Scope ID")}<input value={derive.output_scope_id} onChange={(event) => setDerive({ ...derive, output_scope_id: event.target.value })} placeholder={t("留空使用当前 scope")} /></label>
+        <label className="field">{t("输出 Scope ID")}<input value={derive.output_scope_id} onChange={(event) => setDerive({ ...derive, output_scope_id: event.target.value, idempotency_key: "" })} placeholder={t("留空使用当前 scope")} /></label>
         <button disabled={!scopeId || !derive.object_id || !derivePresetValid} onClick={() => run("variant.submit", () => request(`/scopes/${scopeId}/derived-variants`, { method: "POST", body: JSON.stringify({ object_id: derive.object_id, preset_id: derive.preset_id, output_key: derive.output_key || undefined, output_scope_id: derive.output_scope_id || undefined }) }))}>{t("提交派生任务")}</button>
         <details className="workbenchDetails" open={handoffOpen || Boolean(batchObjectIds.length || derive.snapshot_id)}>
           <summary>{t("批量派生")}</summary>
           <p className="hint">{t("已知选中对象直接提交 object_ids；全查询范围必须先在资产页固定 snapshot，再填 snapshot_id。预计提交数只按已知对象数或 snapshot×preset 数计算。")}</p>
-          <label className="field">{t("对象 ID 列表")}<textarea value={derive.object_ids} onChange={(event) => { setDerive({ ...derive, object_ids: event.target.value, snapshot_id: "" }); setHandoffOpen(true); }} placeholder={t("每行一个 object_id，可由资产页“生成派生”带入")} /></label>
-          <label className="field">{t("Snapshot ID")}<input value={derive.snapshot_id} onChange={(event) => { setDerive({ ...derive, snapshot_id: event.target.value, object_ids: "" }); setHandoffOpen(true); }} placeholder={t("批量全查询时使用固定快照")} /></label>
+          <label className="field">{t("对象 ID 列表")}<textarea value={derive.object_ids} onChange={(event) => { setDerive({ ...derive, object_ids: event.target.value, snapshot_id: "", idempotency_key: "" }); setHandoffOpen(true); }} placeholder={t("每行一个 object_id，可由资产页“生成派生”带入")} /></label>
+          <label className="field">{t("Snapshot ID")}<input value={derive.snapshot_id} onChange={(event) => { setDerive({ ...derive, snapshot_id: event.target.value, object_ids: "", idempotency_key: "" }); setHandoffOpen(true); }} placeholder={t("批量全查询时使用固定快照")} /></label>
           <div className="presetChecks" aria-label={t("批量 preset")}>
-            {items.map((item) => <label key={item.id}><input type="checkbox" checked={batchPresetIds.has(item.id)} onChange={(event) => setBatchPresetIds(toggle(batchPresetIds, item.id, event.target.checked))} /> {item.name} v{item.version}</label>)}
+            {items.map((item) => <label key={item.id}><input type="checkbox" checked={batchPresetIds.has(item.id)} onChange={(event) => { setBatchPresetIds(toggle(batchPresetIds, item.id, event.target.checked)); setDerive((old) => ({ ...old, idempotency_key: "" })); }} /> {item.name} v{item.version}</label>)}
           </div>
-          <label className="field">{t("Idempotency Key")}<input value={derive.idempotency_key} onChange={(event) => setDerive({ ...derive, idempotency_key: event.target.value })} placeholder={t("可选，重试时复用")} /></label>
+          <label className="field">{t("Idempotency Key")}<input value={derive.idempotency_key} onChange={(event) => setDerive({ ...derive, idempotency_key: event.target.value })} placeholder={t("留空时自动生成，重试时复用")} /></label>
           <div className="summaryGrid">
             <Metric label={t("对象来源")} value={batchObjectIds.length ? `${batchObjectIds.length} selected` : derive.snapshot_id ? "snapshot" : "none"} />
             <Metric label={t("Preset 数")} value={selectedPresetIds.length} />
             <Metric label={t("预计任务")} value={plannedBatchCount || t("unknown")} />
           </div>
-          <button disabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} onClick={() => run("variant.batch.submit", submitBatch)}>{t("提交批量派生")}</button>
+          <button disabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} onClick={() => run("variant.batch.submit", submitBatch, true, applyBatchResult)}>{t("提交批量派生")}</button>
           <label className="field">{t("Batch ID")}<input value={derive.batch_id} onChange={(event) => setDerive({ ...derive, batch_id: event.target.value })} placeholder={t("批量提交返回的 id")} /></label>
           <button disabled={!scopeId || !derive.batch_id} onClick={() => run("variant.batch.get", () => request(`/scopes/${scopeId}/derived-variant-batches/${encodeURIComponent(derive.batch_id)}`), false)}>{t("读取批次详情")}</button>
         </details>
@@ -1410,7 +1416,7 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
       </div>
       <div className="stack workbenchCard flush">
         <DataTable columns={[t("名称"), t("版本"), t("模式"), t("尺寸"), t("格式")]} rows={items.map((item) => [item.name, item.version, String(item.params?.mode || "fit"), `${String(item.params?.width || "?")}×${String(item.params?.height || "?")}`, String(item.params?.format || "webp")])} />
-        <DerivedHealthPanel data={health} refresh={() => refresh().catch(() => undefined)} rebuildDisabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} rebuild={() => run("variant.health.rebuild", submitBatch)} />
+        <DerivedHealthPanel data={health} refresh={() => refresh().catch(() => undefined)} rebuildDisabled={!scopeId || (!batchObjectIds.length && !derive.snapshot_id) || selectedPresetIds.length === 0} rebuild={() => run("variant.health.rebuild", submitBatch, true, applyBatchResult)} />
         <ReportBox title={t("派生记录")} data={variants.slice(0, 12)} />
         <ReportBox title={t("分组")} data={groups.slice(0, 12)} />
         <ReportBox title={t("分组成员")} data={groupMembers} />
