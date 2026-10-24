@@ -1412,6 +1412,45 @@ def get_retention(conn: sqlite3.Connection, adapter: Any, *, bucket: str, key: s
     return {"status": "succeeded", "retention": retention, "legal_hold": hold}
 
 
+def read_bucket_config(adapter: Any, *, bucket: str, kind: str) -> dict[str, Any]:
+    """Read a bucket config; a bucket with none reads as ``{}`` with a stable hash."""
+    if kind not in CONFIG_KINDS:
+        raise ValidationError("unknown bucket config kind")
+    config = _read_bucket_config(adapter, bucket, kind)
+    return {
+        "kind": kind,
+        "bucket": bucket,
+        "config": config,
+        "configuration_state": "configured" if config else "not_configured",
+        "current_hash": sha256_text(canonical_json(config)),
+        "cas_supported": False,
+    }
+
+
+def _read_bucket_config(adapter: Any, bucket: str, kind: str) -> dict[str, Any]:
+    try:
+        return _call_required(adapter, f"get_bucket_{kind}", bucket)
+    except Exception as exc:
+        # S3 answers NoSuch*Configuration / NoSuchBucketPolicy for an empty bucket;
+        # that is a real, hashable state, not a missing object.
+        if getattr(exc, "code", None) == "NOT_CONFIGURED":
+            return {}
+        raise
+
+
+def _apply_bucket_config(adapter: Any, bucket: str, kind: str, config: Mapping[str, Any]) -> None:
+    if config:
+        _call_required(adapter, f"put_bucket_{kind}", bucket, dict(config))
+    else:
+        # There is no "put empty"; restoring a not-configured snapshot deletes it.
+        _call_required(adapter, f"delete_bucket_{kind}", bucket)
+
+
+def _bucket_write_failure_state(exc: BaseException) -> str:
+    # The write was sent: only a definite refusal proves the bucket is unchanged.
+    return "failed" if _write_refused(exc) else "needs_review"
+
+
 def update_bucket_config(
     conn: sqlite3.Connection,
     adapter: Any,
@@ -1435,10 +1474,10 @@ def update_bucket_config(
     if exclusive_writer_ack is not True:
         raise ValidationError("exclusive_writer_ack=true is required for cooperative bucket config edits")
     _validate_bucket_config(kind, new_config)
+    if not new_config:
+        raise ValidationError("bucket config must not be empty; an empty config cannot be saved")
     _ensure_no_active_bucket_config_intent(conn, scope_id, bucket, kind)
-    get_name = f"get_bucket_{kind}"
-    put_name = f"put_bucket_{kind}"
-    current = _call_required(adapter, get_name, bucket)
+    current = _read_bucket_config(adapter, bucket, kind)
     current_hash = sha256_text(canonical_json(current))
     if expected_current_hash != current_hash:
         raise ConflictError("bucket config changed before save")
@@ -1459,8 +1498,8 @@ def update_bucket_config(
             (before_snapshot_id, scope_id, bucket, kind, canonical_json(current), current_hash, "before_write", utc_now()),
         )
     try:
-        _call_required(adapter, put_name, bucket, dict(new_config))
-        readback = _call_required(adapter, get_name, bucket)
+        _apply_bucket_config(adapter, bucket, kind, new_config)
+        readback = _read_bucket_config(adapter, bucket, kind)
         readback_hash = sha256_text(canonical_json(readback))
         requested_hash = sha256_text(canonical_json(new_config))
         warnings = ["backend has no remote CAS; save used cooperative hash reread plus readback"]
@@ -1491,7 +1530,7 @@ def update_bucket_config(
         return {"status": status, "before_hash": current_hash, "readback_hash": readback_hash, "requested_hash": requested_hash, "warning": warning, "warnings": warnings, "before_snapshot_id": before_snapshot_id, "config": readback}
     except Exception as exc:
         with _transaction(conn):
-            _finish_intent(conn, intent_id, "failed", error=str(exc))
+            _finish_intent(conn, intent_id, _bucket_write_failure_state(exc), error=f"{getattr(exc, 'code', type(exc).__name__)}: {exc}")
         raise
 
 
@@ -1538,9 +1577,7 @@ def rollback_bucket_config(
         raise ConflictError("newer bucket config save exists; rollback snapshot is no longer the last applied condition")
     config = json.loads(snapshot[4])
     _validate_bucket_config(kind, config)
-    get_name = f"get_bucket_{kind}"
-    put_name = f"put_bucket_{kind}"
-    current = _call_required(adapter, get_name, bucket)
+    current = _read_bucket_config(adapter, bucket, kind)
     current_hash = sha256_text(canonical_json(current))
     if current_hash != expected_current_hash:
         raise ConflictError("bucket config changed before rollback")
@@ -1552,8 +1589,8 @@ def rollback_bucket_config(
             target={"bucket": bucket, "kind": kind, "snapshot_id": snapshot_id, "before_hash": current_hash, "restore_hash": snapshot[5]},
         )
     try:
-        _call_required(adapter, put_name, bucket, config)
-        readback = _call_required(adapter, get_name, bucket)
+        _apply_bucket_config(adapter, bucket, kind, config)
+        readback = _read_bucket_config(adapter, bucket, kind)
         readback_hash = sha256_text(canonical_json(readback))
         warnings = ["backend has no remote CAS; rollback used cooperative hash reread plus readback"]
         status = "succeeded_with_warning"
@@ -1583,7 +1620,7 @@ def rollback_bucket_config(
         return {"status": status, "before_hash": current_hash, "readback_hash": readback_hash, "restored_hash": snapshot[5], "warning": warning, "warnings": warnings, "config": readback}
     except Exception as exc:
         with _transaction(conn):
-            _finish_intent(conn, intent_id, "failed", error=str(exc))
+            _finish_intent(conn, intent_id, _bucket_write_failure_state(exc), error=f"{getattr(exc, 'code', type(exc).__name__)}: {exc}")
         raise
 
 

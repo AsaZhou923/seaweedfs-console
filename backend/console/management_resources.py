@@ -420,7 +420,28 @@ def _missing_capability(exc: Exception, capability: str) -> AppError:
 
 
 def _object_lock_not_configured(exc: Exception) -> bool:
-    return _s3_error_code(exc) in {"NoSuchObjectLockConfiguration", "ObjectLockConfigurationNotFoundError"}
+    return _s3_error_code(exc) in {"NoSuchObjectLockConfiguration", "NoSuchBucketObjectLockConfiguration", "ObjectLockConfigurationNotFoundError"}
+
+
+def _s3_readback(read: Callable[[], Any], *, not_configured: Any, capability: str) -> Callable[[], Any]:
+    """Wrap an S3 readback so "not configured" is an empty snapshot.
+
+    Without this, a first-time configuration write aborts on its before-read,
+    because botocore raises for the empty state. Other failures become a typed
+    AppError that carries safe detail instead of an opaque 502.
+    """
+
+    def run() -> Any:
+        try:
+            return read()
+        except AppError:
+            raise
+        except Exception as exc:
+            if _object_lock_not_configured(exc) or _s3_error_code(exc) in {"NoSuchCORSConfiguration", "NoSuchLifecycleConfiguration", "NoSuchBucketPolicy"}:
+                return not_configured
+            raise _missing_capability(exc, capability) from exc
+
+    return run
 
 
 def _not_found_error(exc: Exception) -> bool:
@@ -751,8 +772,44 @@ def _bucket_policy_match(policy: Mapping[str, Any]) -> Callable[[Any, Any, Any],
     return verify
 
 
-def _config_deleted(_before: Any, after: Any, _response: Any) -> bool:
-    return after in (None, {}, [])
+def _config_deleted(empty_values: Mapping[str, Callable[[Any], bool]]) -> Callable[[Any, Any, Any], bool]:
+    """Confirm a delete only from a readback in a recognized empty shape.
+
+    The 4.48 admin API answers a deleted policy with ``{"bucket": b, "policy": null}``
+    and a deleted lifecycle with ``{"bucket": b, "rules": []}``. Each config field
+    has its own emptiness check, so a remaining document (even ``{"Statement": []}``)
+    or an unknown schema is never taken as proof of deletion, and only identifying
+    keys may sit beside it.
+    """
+
+    def verify(_before: Any, after: Any, _response: Any) -> bool:
+        if after in (None, {}, []):
+            return True
+        if not isinstance(after, Mapping):
+            return False
+        present = [field for field in empty_values if field in after]
+        if not present or set(after) - set(empty_values) - {"bucket", "name"}:
+            return False
+        return all(empty_values[field](after[field]) for field in present)
+
+    return verify
+
+
+def _no_policy(value: Any) -> bool:
+    return value is None or value == "" or value == {}
+
+
+def _no_lifecycle_rules(value: Any) -> bool:
+    return value is None or value == []
+
+
+def _no_lifecycle(value: Any) -> bool:
+    # Only {} or the documented wrapper {"rules": []}; any other key is unknown schema.
+    return value is None or value == {} or (isinstance(value, Mapping) and set(value) == {"rules"} and _no_lifecycle_rules(value["rules"]))
+
+
+_POLICY_DELETED = _config_deleted({"policy": _no_policy, "Policy": _no_policy})
+_LIFECYCLE_DELETED = _config_deleted({"rules": _no_lifecycle_rules, "lifecycle": _no_lifecycle})
 
 
 def _versioning_matches(status: str) -> Callable[[Any, Any, Any], bool]:
@@ -1126,7 +1183,7 @@ def update_bucket_versioning(request: Request, management_id: str, bucket: str, 
             path=f"/s3/buckets/{_q(bucket)}/versioning",
             payload=payload,
             invoke=lambda: s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": status}),
-            readback=lambda: s3.get_bucket_versioning(Bucket=bucket),
+            readback=_s3_readback(lambda: s3.get_bucket_versioning(Bucket=bucket), not_configured={}, capability="bucket versioning"),
             verify=_versioning_matches(status),
         )
     finally:
@@ -1179,7 +1236,7 @@ def update_bucket_object_lock(request: Request, management_id: str, bucket: str,
             path=f"/s3/buckets/{_q(bucket)}/object-lock",
             payload=payload,
             invoke=lambda: s3.put_object_lock_configuration(Bucket=bucket, ObjectLockConfiguration=dict(config)),
-            readback=lambda: s3.get_object_lock_configuration(Bucket=bucket),
+            readback=_s3_readback(lambda: s3.get_object_lock_configuration(Bucket=bucket), not_configured={"ObjectLockConfiguration": {}}, capability="bucket object lock"),
             verify=_object_lock_matches(config),
         )
     finally:
@@ -1222,7 +1279,7 @@ def update_bucket_lifecycle(request: Request, management_id: str, bucket: str, b
 @router.delete("/{management_id}/buckets/{bucket}/lifecycle")
 def delete_bucket_lifecycle(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", verify=_config_deleted)
+    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/lifecycle", verify=_LIFECYCLE_DELETED)
 
 
 @router.get("/{management_id}/buckets/{bucket}/policy")
@@ -1245,7 +1302,7 @@ def update_bucket_policy(request: Request, management_id: str, bucket: str, body
 @router.delete("/{management_id}/buckets/{bucket}/policy")
 def delete_bucket_policy(request: Request, management_id: str, bucket: str):
     mgmt = _require_management(request, management_id, write=True)
-    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/policy", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/policy", verify=_config_deleted)
+    return _mutate(request, mgmt, action="bucket.manage", method="DELETE", path=f"/api/s3/buckets/{_q(bucket)}/policy", payload={"bucket": bucket}, readback_path=f"/api/s3/buckets/{_q(bucket)}/policy", verify=_POLICY_DELETED)
 
 
 @router.get("/{management_id}/iam/users")

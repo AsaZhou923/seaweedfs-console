@@ -364,6 +364,84 @@ def test_copy_failure_before_dispatch_is_failed_and_after_dispatch_needs_review(
     assert _copy_intent_status(conn)[0] == "needs_review"
 
 
+class NotConfigured(Exception):
+    code = "NOT_CONFIGURED"
+    status = 404
+
+
+class EmptyBucketAdapter(FakeAdapter):
+    """A bucket with no CORS: GET answers NOT_CONFIGURED until a config is put."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = {"cors": None}
+        self.deletes = []
+
+    def get_bucket_cors(self, bucket):
+        if self.config["cors"] is None:
+            raise NotConfigured("no cors")
+        return dict(self.config["cors"])
+
+    def delete_bucket_cors(self, bucket):
+        self.deletes.append(bucket)
+        self.config["cors"] = None
+
+
+CORS = {"CORSRules": [{"AllowedOrigins": ["https://app.test"], "AllowedMethods": ["GET"]}]}
+EMPTY_HASH = enh.sha256_text(enh.canonical_json({}))
+
+
+def _bucket_intents(conn):
+    return [row[0] for row in conn.execute("SELECT status FROM operation_intents WHERE operation_type LIKE 'bucket.cors.%' ORDER BY rowid")]
+
+
+def test_bucket_config_reads_not_configured_as_empty_with_stable_hash(conn):
+    adapter = EmptyBucketAdapter()
+
+    first = enh.read_bucket_config(adapter, bucket="b", kind="cors")
+    second = enh.read_bucket_config(adapter, bucket="b", kind="cors")
+
+    assert first["config"] == {}
+    assert first["configuration_state"] == "not_configured"
+    assert first["current_hash"] == second["current_hash"] == EMPTY_HASH
+
+
+def test_bucket_config_first_create_and_rollback_to_not_configured(conn):
+    adapter = EmptyBucketAdapter()
+
+    created = enh.update_bucket_config(conn, adapter, scope_id="s1", bucket="b", kind="cors", new_config=CORS, expected_current_hash=EMPTY_HASH, exclusive_writer_ack=True, admin_manage_bucket=True)
+
+    assert created["status"] == "succeeded_with_warning"
+    assert created["before_hash"] == EMPTY_HASH
+    assert enh.read_bucket_config(adapter, bucket="b", kind="cors")["configuration_state"] == "configured"
+
+    rolled = enh.rollback_bucket_config(conn, adapter, scope_id="s1", bucket="b", kind="cors", snapshot_id=created["before_snapshot_id"], expected_current_hash=enh.sha256_text(enh.canonical_json(CORS)), exclusive_writer_ack=True, admin_manage_bucket=True)
+
+    assert adapter.deletes == ["b"]
+    assert rolled["status"] == "succeeded_with_warning"
+    assert rolled["readback_hash"] == EMPTY_HASH
+    assert _bucket_intents(conn) == ["succeeded_with_warning", "succeeded_with_warning"]
+
+
+def test_bucket_config_refuses_saving_an_empty_config(conn):
+    with pytest.raises(enh.ValidationError, match="must not be empty"):
+        enh.update_bucket_config(conn, EmptyBucketAdapter(), scope_id="s1", bucket="b", kind="cors", new_config={}, expected_current_hash=EMPTY_HASH, exclusive_writer_ack=True, admin_manage_bucket=True)
+
+
+@pytest.mark.parametrize(("status", "expected"), [(403, "failed"), (400, "failed"), (503, "needs_review"), (None, "needs_review")])
+def test_bucket_config_put_failure_is_failed_only_for_definite_refusal(conn, status, expected):
+    class FailingPut(EmptyBucketAdapter):
+        def put_bucket_cors(self, bucket, config):
+            if status is None:
+                raise TimeoutError("read timed out")
+            raise StatusError(status, "STORAGE_ERROR")
+
+    with pytest.raises(Exception):
+        enh.update_bucket_config(conn, FailingPut(), scope_id="s1", bucket="b", kind="cors", new_config=CORS, expected_current_hash=EMPTY_HASH, exclusive_writer_ack=True, admin_manage_bucket=True)
+
+    assert _bucket_intents(conn) == [expected]
+
+
 def test_restore_version_writes_new_target_only(conn):
     adapter = FakeAdapter()
     result = enh.restore_object_version(conn, adapter, scope_id="s1", bucket="b", key="source", version_id="v1", target_key="restored")

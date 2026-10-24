@@ -270,6 +270,21 @@ class S3EnhancementAdapter:
         except Exception as exc:
             raise storage.sanitize_storage_exception(exc) from exc
 
+    def delete_bucket_cors(self, bucket: str) -> None:
+        self._delete_bucket_config("delete_bucket_cors", bucket)
+
+    def delete_bucket_lifecycle(self, bucket: str) -> None:
+        self._delete_bucket_config("delete_bucket_lifecycle", bucket)
+
+    def delete_bucket_policy(self, bucket: str) -> None:
+        self._delete_bucket_config("delete_bucket_policy", bucket)
+
+    def _delete_bucket_config(self, operation: str, bucket: str) -> None:
+        try:
+            getattr(self.s3, operation)(Bucket=bucket)
+        except Exception as exc:
+            raise storage.sanitize_storage_exception(exc) from exc
+
 
 def _identity(bucket: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
     modified = data.get("LastModified") or data.get("last_modified")
@@ -1365,9 +1380,10 @@ def get_bucket_config(request: Request, scope_id: str, kind: str):
         raise AppError("INVALID_CONFIG_KIND", "未知桶配置类型。", 404)
     with db.connect(request.app.state.settings) as conn:
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
-        method = getattr(adapter, f"get_bucket_{kind}")
-        config = method(scope["bucket"])
-        return {"kind": kind, "bucket": scope["bucket"], "config": config, "current_hash": enhancements.sha256_text(enhancements.canonical_json(config)), "cas_supported": False}
+        try:
+            return enhancements.read_bucket_config(adapter, bucket=scope["bucket"], kind=kind)
+        except Exception as exc:
+            _raise(exc)
 
 
 @router.post("/scopes/{scope_id}/bucket/{kind}")

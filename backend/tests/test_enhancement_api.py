@@ -950,6 +950,50 @@ def test_bucket_config_api_hash_ack_and_rollback_contract(settings, monkeypatch)
     assert "ResponseMetadata" not in rolled["config"]
 
 
+@pytest.mark.parametrize(
+    ("kind", "s3_method", "code"),
+    [
+        ("cors", "get_bucket_cors", "NoSuchCORSConfiguration"),
+        ("lifecycle", "get_bucket_lifecycle_configuration", "NoSuchLifecycleConfiguration"),
+        ("policy", "get_bucket_policy", "NoSuchBucketPolicy"),
+    ],
+)
+def test_bucket_config_api_reports_not_configured_with_hash(settings, monkeypatch, kind, s3_method, code):
+    setup_variant(settings)
+    fake = FakeS3()
+
+    def missing(Bucket):
+        raise S3Error(404, code)
+
+    setattr(fake, s3_method, missing)
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda conn, settings, scope: enhancement_api.S3EnhancementAdapter(fake))
+    monkeypatch.setattr(enhancement_api, "_require_scope", lambda request, scope_id, write=False, manage_bucket=False: core.ensure_scope_permission(db.connect(settings), scope_id, "object:read"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)), headers={}, cookies={})
+
+    current = enhancement_api.get_bucket_config(request, "s", kind)
+
+    assert current["config"] == {}
+    assert current["configuration_state"] == "not_configured"
+    assert current["current_hash"] == enhancements.sha256_text(enhancements.canonical_json({}))
+
+
+def test_bucket_config_adapter_deletes_map_to_s3_operations():
+    calls = []
+
+    class DeletingS3:
+        def __getattr__(self, name):
+            if not name.startswith("delete_bucket_"):
+                raise AttributeError(name)
+            return lambda **kwargs: calls.append((name, kwargs))
+
+    adapter = enhancement_api.S3EnhancementAdapter(DeletingS3())
+    adapter.delete_bucket_cors("b")
+    adapter.delete_bucket_lifecycle("b")
+    adapter.delete_bucket_policy("b")
+
+    assert calls == [("delete_bucket_cors", {"Bucket": "b"}), ("delete_bucket_lifecycle", {"Bucket": "b"}), ("delete_bucket_policy", {"Bucket": "b"})]
+
+
 def test_bucket_config_adapter_strips_transport_metadata_from_semantic_config():
     class MetadataS3:
         def get_bucket_cors(self, Bucket):
