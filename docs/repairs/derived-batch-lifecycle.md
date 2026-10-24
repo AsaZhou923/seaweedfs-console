@@ -12,7 +12,7 @@ Fixes #35 and #49, the create and complete halves of the same batch lifecycle.
 
 ## Validation
 
-- Backend: **473 passed** (`.venv\Scripts\python.exe -m pytest backend/tests -q -p no:cacheprovider -o addopts=`). This includes 17 new or updated cases in `backend/tests/test_enhancement_api.py`.
+- Backend: **473 passed** (`.venv\Scripts\python.exe -m pytest backend/tests -q -p no:cacheprovider -o addopts=`). This includes 15 new or updated cases in `backend/tests/test_enhancement_api.py`.
 - Frontend: `npm run build` passed; `npm run test:i18n` gives `I18N_PASS 1438 bilingual messages`. `node scripts/verify_frontend_review_regressions.cjs` reports `failures: []` against the fully mocked local service.
 
 These are synthetic-adapter, API and mocked-browser results. They make no claim of live-service acceptance; `scripts/integration_smoke.py` was updated for the literal `output_prefix` but was not run.
