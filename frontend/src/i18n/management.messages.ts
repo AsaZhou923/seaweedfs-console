@@ -587,6 +587,7 @@ export const managementMessages: Record<string, { en: string; "zh-CN": string }>
   "Configured": { en: "Configured", "zh-CN": "已配置" },
   "Empty response": { en: "Empty response", "zh-CN": "空响应" },
   "Not configured": { en: "Not configured", "zh-CN": "未配置" },
+  "Not found": { en: "Not found", "zh-CN": "未找到" },
   "Permission denied": { en: "Permission denied", "zh-CN": "权限不足" },
   "Verified": { en: "Verified", "zh-CN": "已核验" },
   "Choose a storage scope to see its bucket and authorized prefix. Browsing stays within this boundary.": { en: "Choose a storage scope to see its bucket and authorized prefix. Browsing stays within this boundary.", "zh-CN": "选择存储范围，确认所在的桶和授权前缀。只能浏览此范围内的对象。" },

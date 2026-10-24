@@ -1152,6 +1152,7 @@ function serviceHealthState(status: unknown) {
   const text = String(status || "unknown").toLowerCase();
   if (["healthy", "ok", "reachable", "supported", "reported", "configured"].includes(text)) return "reported";
   if (text === "not_configured") return "not_configured";
+  if (text === "not_found") return "not_found";
   if (text === "permission_denied") return "permission_denied";
   if (["unreachable", "bad_response", "failed", "error"].includes(text)) return "error";
   return "unknown";
@@ -1318,7 +1319,7 @@ function yesNoUnknown(value: unknown) {
 }
 
 function stateLabel(state: string) {
-  const label = ({ reported: "Official report", supported: "Official report", configured: "Configured", empty_response: "Empty response", not_configured: "Not configured", unsupported: "Unsupported", permission_denied: "Permission denied", confirmed: "Verified", needs_review: "Needs review", failed: "Failed", error: "Error", unknown: "Unknown" } as Record<string, string>)[state] || "Unknown";
+  const label = ({ reported: "Official report", supported: "Official report", configured: "Configured", empty_response: "Empty response", not_configured: "Not configured", not_found: "Not found", unsupported: "Unsupported", permission_denied: "Permission denied", confirmed: "Verified", needs_review: "Needs review", failed: "Failed", error: "Error", unknown: "Unknown" } as Record<string, string>)[state] || "Unknown";
   return t(label);
 }
 
@@ -1327,6 +1328,7 @@ function moduleStatus(value: Record<string, any>) {
   if (states.includes("supported")) return "reported";
   if (states.includes("not_configured")) return "not_configured";
   if (states.includes("unsupported")) return "unsupported";
+  if (states.includes("not_found")) return "not_found";
   return "unknown";
 }
 

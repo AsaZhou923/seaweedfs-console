@@ -304,12 +304,13 @@ def _optional(label: str, fetch: Callable[[], Any]) -> dict[str, Any]:
 
 def _status_from_error(exc: AppError) -> str:
     return {
-        "ADMIN_ENDPOINT_NOT_FOUND": "not_configured",
+        # A 404 from a configured endpoint is "not found"; not_configured stays reserved for missing endpoints.
+        "ADMIN_ENDPOINT_NOT_FOUND": "not_found",
         "ADMIN_ENDPOINT_UNSUPPORTED": "unsupported",
         "ADMIN_BAD_RESPONSE": "stub",
         "ADMIN_TIMEOUT": "unreachable",
         "ADMIN_UNREACHABLE": "unreachable",
-        "NATIVE_NOT_FOUND": "not_configured",
+        "NATIVE_NOT_FOUND": "not_found",
         "NATIVE_BAD_RESPONSE": "stub",
         "NATIVE_TIMEOUT": "unreachable",
         "NATIVE_UNREACHABLE": "unreachable",
