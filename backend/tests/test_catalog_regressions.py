@@ -325,9 +325,9 @@ def test_missing_candidate_phase_checkpoints_each_batch_and_rate_limits(foundati
 
     catalog.execute_job(claimed, settings)
 
-    # 120 candidates in batches of 50: three batches plus the empty final read.
-    assert len(phases) == 4
-    assert [phase["last_candidate"] != "" for phase in phases] == [False, True, True, True]
+    # One lease refresh before every HEAD, plus one per batch read (3 batches + the empty final read).
+    assert len(phases) == 120 + 4
+    assert phases[0]["last_candidate"] == "" and all(phase["last_candidate"] for phase in phases[2:])
     assert len(fake.heads) == 120
     assert len(sleeps) == 120
     assert conn.execute("SELECT COUNT(*) FROM objects WHERE presence='missing_confirmed'").fetchone()[0] == 120
@@ -355,8 +355,9 @@ def test_missing_candidate_phase_honours_pause_and_resumes_without_relisting(fou
     checkpoint = json.loads(paused["checkpoint_json"])
     assert paused["state"] == "paused"
     assert checkpoint["phase"] == "confirm_missing"
-    assert len(fake.heads) == 50  # the in-flight batch finishes; the next one is not started
-    assert conn.execute("SELECT COUNT(*) FROM objects WHERE presence='missing_candidate'").fetchone()[0] == 10
+    assert len(fake.heads) == 1  # controls are checked before every HEAD
+    assert checkpoint["last_candidate"]
+    assert conn.execute("SELECT COUNT(*) FROM objects WHERE presence='missing_candidate'").fetchone()[0] == 59
 
     fake.on_head = None
     list_calls = fake.list_calls
@@ -370,6 +371,22 @@ def test_missing_candidate_phase_honours_pause_and_resumes_without_relisting(fou
     assert fake.list_calls == list_calls
     assert len(fake.heads) == 60
     assert conn.execute("SELECT COUNT(*) FROM objects WHERE presence='missing_confirmed'").fetchone()[0] == 60
+    assert conn.execute("SELECT state FROM jobs WHERE id=?", (claimed["id"],)).fetchone()[0] == "succeeded"
+
+
+def test_low_scan_rate_never_waits_past_the_job_lease(foundation, monkeypatch: pytest.MonkeyPatch):
+    conn, settings, scope = foundation
+    seed_missing_candidates(conn, scope, 3)
+    fake = CandidateS3({"raw/a.jpg": image_bytes()})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    sleeps: list[float] = []
+    monkeypatch.setattr(catalog.time, "sleep", sleeps.append)
+    claimed = claim_job(conn, scope["id"], "scan", scan_params(scope, objects_per_second=0.001))
+
+    catalog.execute_job(claimed, settings)
+
+    assert len(sleeps) == 4  # one listed object, three candidates
+    assert max(sleeps) <= catalog.MAX_RATE_WAIT_SECONDS < 120
     assert conn.execute("SELECT state FROM jobs WHERE id=?", (claimed["id"],)).fetchone()[0] == "succeeded"
 
 

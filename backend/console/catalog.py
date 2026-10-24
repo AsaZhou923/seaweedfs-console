@@ -507,7 +507,7 @@ def _scan(job, settings, scope, s3, params, progress):
                     conn.execute("INSERT INTO job_items(job_id,object_id,state,error_code,created_at) VALUES(?,?,?,?,?)",
                                  (job["id"], obj["id"], "failed", err, jobs.now()))
                 jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
-            time.sleep(max(0, 1 / rate - (time.monotonic() - started)))
+            _rate_wait(rate, started)
         if processed >= maximum and next_token:
             with db.connect(settings) as conn:
                 jobs.checkpoint(conn, job, state="failed", processed=processed, errors=errors, data={"token": next_token, "next_token": None, "page": None, "position": 0}, error_code="SCAN_BUDGET_EXHAUSTED")
@@ -545,6 +545,13 @@ def _confirm_missing_and_finish(job, settings, s3, params, rate, processed, erro
             break
         for obj in candidates:
             started = time.monotonic()
+            with db.connect(settings) as conn:
+                current = jobs.fenced(conn, job)
+                scope = _scope_for_job(conn, job, params)
+                # Refresh the lease and honour controls before every rate-limited HEAD.
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"phase": "confirm_missing", "last_candidate": last_candidate})
+                if current["pause_requested_at"] or current["cancel_requested_at"]:
+                    return
             last_candidate = obj["id"]
             try:
                 head = s3.head_object(Bucket=scope["bucket"], Key=obj["key"])
@@ -555,7 +562,7 @@ def _confirm_missing_and_finish(job, settings, s3, params, rate, processed, erro
                         conn.execute("UPDATE objects SET presence='missing_confirmed' WHERE id=?", (obj["id"],))
             else:
                 _restore_missing_candidate(settings, job, params, obj, head)
-            time.sleep(max(0, 1 / rate - (time.monotonic() - started)))
+            _rate_wait(rate, started)
     with db.connect(settings) as conn:
         jobs.fenced(conn, job)
         scope = _scope_for_job(conn, job, params)
@@ -563,6 +570,14 @@ def _confirm_missing_and_finish(job, settings, s3, params, rate, processed, erro
         final_state = "partially_failed" if errors else "succeeded"
         _persist_scan_capacity_sample(conn, scope, job, final_state, processed=processed, errors=errors)
         jobs.checkpoint(conn, job, state=final_state, processed=processed, errors=errors, data={"enumeration_complete": True})
+
+
+MAX_RATE_WAIT_SECONDS = 60  # half the 120 s job lease, refreshed before each object
+
+
+def _rate_wait(rate, started):
+    """Pace scan requests without letting one wait outlive the job lease."""
+    time.sleep(min(MAX_RATE_WAIT_SECONDS, max(0, 1 / rate - (time.monotonic() - started))))
 
 
 def _restore_missing_candidate(settings, job, params, obj, head):
