@@ -440,6 +440,9 @@ def _scan(job, settings, scope, s3, params, progress):
     maximum = int(params.get("max_objects", 100000))
     page_size = max(1, min(1000, int(params.get("page_size", params.get("list_max_keys", 1)))))
     rate = float(params.get("objects_per_second", 20))
+    if progress.get("phase") == "confirm_missing":
+        _confirm_missing_and_finish(job, settings, s3, params, rate, processed, errors, progress.get("last_candidate", ""))
+        return
     while True:
         with db.connect(settings) as conn:
             current = jobs.fenced(conn, job)
@@ -477,7 +480,7 @@ def _scan(job, settings, scope, s3, params, progress):
                     return
                 # Refresh the lease before bounded network/decode work.
                 jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
-            props, err = {}, None
+            props, err, obs = {}, None, None
             try:
                 head = s3.head_object(Bucket=scope["bucket"], Key=key)
                 obs = observation(key, head)
@@ -488,7 +491,10 @@ def _scan(job, settings, scope, s3, params, progress):
                     err = "IMAGE_" + props["decode_status"].upper()
             except Exception as exc:
                 err = getattr(exc, "code", "STORAGE_UNAVAILABLE")
-                obs = observation(key, listed)
+                # Keep the best real observation: the HEAD when it succeeded,
+                # otherwise the listing entry, which is already normalized.
+                # Re-normalizing it would drop size/ETag and index a fake zero.
+                obs = obs if obs is not None else dict(listed)
                 props = {"decode_status": "resource_limited" if err == "RESOURCE_LIMIT_EXCEEDED" else "read_failed", "error_code": err}
             with db.connect(settings) as conn:
                 jobs.fenced(conn, job)
@@ -501,7 +507,7 @@ def _scan(job, settings, scope, s3, params, progress):
                     conn.execute("INSERT INTO job_items(job_id,object_id,state,error_code,created_at) VALUES(?,?,?,?,?)",
                                  (job["id"], obj["id"], "failed", err, jobs.now()))
                 jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
-            time.sleep(max(0, 1 / rate - (time.monotonic() - started)))
+            _rate_wait(rate, started)
         if processed >= maximum and next_token:
             with db.connect(settings) as conn:
                 jobs.checkpoint(conn, job, state="failed", processed=processed, errors=errors, data={"token": next_token, "next_token": None, "page": None, "position": 0}, error_code="SCAN_BUDGET_EXHAUSTED")
@@ -514,10 +520,23 @@ def _scan(job, settings, scope, s3, params, progress):
             continue
         page, position = None, 0
         break
-    # Confirm previously missing candidates only with an authoritative 404 and bounded pages.
-    last_candidate = ""
+    _confirm_missing_and_finish(job, settings, s3, params, rate, processed, errors, "")
+
+
+def _confirm_missing_and_finish(job, settings, s3, params, rate, processed, errors, last_candidate):
+    """Confirm earlier missing candidates, then publish the terminal scan state.
+
+    Each bounded batch refreshes the lease and honours pause/cancel; the
+    checkpoint records the phase and cursor so a resumed scan continues here
+    instead of relisting. Only an authoritative 404 confirms a deletion.
+    """
     while True:
         with db.connect(settings) as conn:
+            current = jobs.fenced(conn, job)
+            scope = _scope_for_job(conn, job, params)
+            jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"phase": "confirm_missing", "last_candidate": last_candidate})
+            if current["pause_requested_at"] or current["cancel_requested_at"]:
+                return
             candidates = [dict(row) for row in conn.execute(
                 "SELECT * FROM objects WHERE scope_id=? AND is_current=1 AND scan_id IS NOT ? AND presence='missing_candidate' AND id>? ORDER BY id LIMIT 50",
                 (scope["id"], job["id"], last_candidate),
@@ -525,14 +544,25 @@ def _scan(job, settings, scope, s3, params, progress):
         if not candidates:
             break
         for obj in candidates:
+            started = time.monotonic()
+            with db.connect(settings) as conn:
+                current = jobs.fenced(conn, job)
+                scope = _scope_for_job(conn, job, params)
+                # Refresh the lease and honour controls before every rate-limited HEAD.
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"phase": "confirm_missing", "last_candidate": last_candidate})
+                if current["pause_requested_at"] or current["cancel_requested_at"]:
+                    return
             last_candidate = obj["id"]
             try:
-                s3.head_object(Bucket=scope["bucket"], Key=obj["key"])
+                head = s3.head_object(Bucket=scope["bucket"], Key=obj["key"])
             except Exception as exc:
                 if storage.sanitize_storage_exception(exc).status == 404:
                     with db.connect(settings) as conn:
                         jobs.fenced(conn, job)
                         conn.execute("UPDATE objects SET presence='missing_confirmed' WHERE id=?", (obj["id"],))
+            else:
+                _restore_missing_candidate(settings, job, params, obj, head)
+            _rate_wait(rate, started)
     with db.connect(settings) as conn:
         jobs.fenced(conn, job)
         scope = _scope_for_job(conn, job, params)
@@ -540,7 +570,28 @@ def _scan(job, settings, scope, s3, params, progress):
         final_state = "partially_failed" if errors else "succeeded"
         _persist_scan_capacity_sample(conn, scope, job, final_state, processed=processed, errors=errors)
         jobs.checkpoint(conn, job, state=final_state, processed=processed, errors=errors, data={"enumeration_complete": True})
-    return
+
+
+MAX_RATE_WAIT_SECONDS = 60  # half the 120 s job lease, refreshed before each object
+
+
+def _rate_wait(rate, started):
+    """Pace scan requests without letting one wait outlive the job lease."""
+    time.sleep(min(MAX_RATE_WAIT_SECONDS, max(0, 1 / rate - (time.monotonic() - started))))
+
+
+def _restore_missing_candidate(settings, job, params, obj, head):
+    """A candidate that still answers HEAD is present; stop re-checking it every scan."""
+    with db.connect(settings) as conn:
+        jobs.fenced(conn, job)
+        scope = _scope_for_job(conn, job, params)
+        obs = observation(obj["key"], head)
+        if core.make_revision(scope["bucket"], obj["key"], obs) == obj["revision"]:
+            conn.execute("UPDATE objects SET presence='present', scan_id=?, observed_at=? WHERE id=?", (job["id"], jobs.now(), obj["id"]))
+        else:
+            # The object changed since it was indexed: record the new revision
+            # without inventing decoded properties for it.
+            core.upsert_object(conn, scope["id"], obs | {"properties": {"decode_status": "unknown"}, "scan_id": job["id"]})
 
 
 def _object_job(job, settings, scope, s3, params, progress):

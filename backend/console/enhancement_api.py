@@ -274,7 +274,8 @@ def _identity(bucket: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
         "key": key,
         "version_id": data.get("VersionId") or data.get("version_id"),
         "etag": data.get("ETag") or data.get("etag"),
-        "size": data.get("ContentLength") or data.get("Size") or data.get("size"),
+        # A zero-byte object is a real size; only fall through on a missing field.
+        "size": next((data[name] for name in ("ContentLength", "Size", "size") if data.get(name) is not None), None),
         "checksum_sha256": data.get("ChecksumSHA256") or data.get("checksum_sha256"),
         "last_modified": modified,
         "content_type": data.get("ContentType") or data.get("content_type"),

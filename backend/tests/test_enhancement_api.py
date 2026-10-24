@@ -588,6 +588,12 @@ def test_run_once_preserves_storage_error_code(settings, monkeypatch):
     assert jobs.error_code(RuntimeError("boom")) == "WORKER_FAILURE"
 
 
+def test_identity_keeps_zero_byte_size():
+    assert enhancement_api._identity("bucket", "empty.jpg", {"ContentLength": 0, "Size": 5})["size"] == 0
+    assert enhancement_api._identity("bucket", "listed.jpg", {"Size": 0})["size"] == 0
+    assert enhancement_api._identity("bucket", "unknown.jpg", {})["size"] is None
+
+
 def test_copy_object_only_treats_404_as_missing_target():
     fake = FakeS3()
     fake.deny_missing_status = 403
