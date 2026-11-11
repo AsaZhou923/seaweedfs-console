@@ -81,6 +81,8 @@ pwsh -NoProfile -File scripts/start.ps1
 
 重启时保留配置环境变量。也可从 `backend/` 分别启动 API 和 worker，使用相同的绝对数据及凭据路径。
 
+批量复制和派生图像要求源 Scope 允许原图下载，排队任务开始执行时也会重新检查。仅允许预览并不授权将完整原图或派生图像导出到另一 Scope。版本删除始终检查目标版本的 Legal Hold 和保留期，即使桶未配置 Object Lock；保护状态未知时禁止删除。
+
 ## 配置
 
 [.env.example](.env.example) 列出环境变量。启动脚本**不会自动加载这个文件**。

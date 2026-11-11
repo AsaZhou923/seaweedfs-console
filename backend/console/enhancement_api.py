@@ -619,6 +619,7 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
     object_id = body["object_id"]
     output_scope_id = body.get("output_scope_id") or scope_id
     with db.connect(request.app.state.settings) as conn:
+        scope = core.ensure_scope_permission(conn, scope_id, "object:download_original")
         source = core.get_object(conn, scope_id, object_id)
         output_scope = core.ensure_scope_permission(conn, output_scope_id, "object:write")
         enhancements.initialize(conn)
@@ -692,6 +693,7 @@ def submit_derived_variant_batch(request: Request, scope_id: str, body: dict[str
     if not idempotency_key:
         raise AppError("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key or idempotency_key is required for derived batches.", 400)
     with db.connect(request.app.state.settings) as conn:
+        scope = core.ensure_scope_permission(conn, scope_id, "object:download_original")
         enhancements.initialize(conn)
         # One write transaction covers the batch row, every variant and every
         # job, so an interrupted request never leaves an empty batch behind.
@@ -1599,7 +1601,7 @@ def _execute_variant_job(job: dict[str, Any], settings: Any, phase: dict[str, bo
         enhancements.initialize(conn)
         variant = enhancements.get_derived_variant(conn, params["variant_id"])
         source = core.get_object(conn, variant["scope_id"], variant["source_object_id"])
-        source_scope = core.ensure_scope_permission(conn, variant["scope_id"], "object:read")
+        source_scope = core.ensure_scope_permission(conn, variant["scope_id"], "object:download_original")
         output_scope = core.ensure_scope_permission(conn, variant["output_scope_id"], "object:write")
         core.assert_key_in_scope(output_scope, variant["output_key"])
         if source_scope["project_id"] != output_scope["project_id"] or source_scope["project_id"] != variant["project_id"]:

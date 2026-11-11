@@ -323,3 +323,37 @@ def test_batch_two_copies_mixed_results_indexes_confirmed_target_and_never_delet
     assert phases == ["confirmed", "needs_review"]
     assert indexed is not None
     assert indexed["checksum"] == hashlib.sha256(b"alpha").hexdigest()
+
+
+@pytest.mark.parametrize("preview", [False, True])
+def test_copy_requires_source_original_grant_before_planning(foundation, preview):
+    settings, source_s3, target_s3, source_scope, target_scope = foundation
+    obj = seed_source(settings, source_s3, source_scope, "raw/private.jpg", b"private")
+    with db.connect(settings) as conn:
+        conn.execute("UPDATE scopes SET allow_original_download=0,allow_preview=? WHERE id=?", (preview, source_scope["id"]))
+        conn.execute("UPDATE scopes SET allow_original_download=1 WHERE id=?", (target_scope["id"],))
+    with pytest.raises(core.AppError) as error:
+        submit(settings, source_scope, [{"object_id": obj["id"], "target_scope_id": target_scope["id"], "target_key": "copied/private.jpg"}])
+    assert error.value.code == "FORBIDDEN_SCOPE"
+    with db.connect(settings) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM copy_batches").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert source_s3.get_calls == []
+    assert target_s3.put_calls == []
+
+
+def test_copy_worker_rechecks_revoked_source_original_grant(foundation):
+    settings, source_s3, target_s3, source_scope, target_scope = foundation
+    obj = seed_source(settings, source_s3, source_scope, "raw/private.jpg", b"private")
+    submit(settings, source_scope, [{"object_id": obj["id"], "target_scope_id": target_scope["id"], "target_key": "copied/private.jpg"}])
+    with db.connect(settings) as conn:
+        conn.execute("UPDATE scopes SET allow_original_download=0 WHERE id=?", (source_scope["id"],))
+    result = run_next(settings)
+    # The generic remote-mutating job runner conservatively retains review status.
+    assert result["state"] == "needs_review"
+    with db.connect(settings) as conn:
+        assert conn.execute("SELECT status FROM copy_batches").fetchone()[0] == "failed"
+        item = conn.execute("SELECT phase,error_code FROM copy_batch_items").fetchone()
+        assert (item["phase"], item["error_code"]) == ("failed", "FORBIDDEN_SCOPE")
+    assert source_s3.get_calls == []
+    assert target_s3.put_calls == []

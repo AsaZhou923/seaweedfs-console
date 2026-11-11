@@ -234,3 +234,8 @@ Admin OIDC、Enterprise 集中监控/管理审计、PITR 等不冒充 OSS 功能
 引用manifest key-based entry省略bucket/connection_id时先用已校验Scope权威身份补齐，再计算并存储canonical entry hash；无bucket权威则拒绝。声明declared_hash必须基于同一完整身份，不能对缺字段原始entry计算hash再期待complete。完整枚举与业务可信引用/并发删除保护仍分开。
 
 容量快照新未测字段保存null；旧快照raw值保留，以legacy_unknown/measurement在返回与阈值中屏蔽。无完整扫描的source、未测temporary/version、缺output_size的派生不能显示已测零值。真实超阈值加未知字段返回alerting并附unknown_fields；纯未测返回unknown。
+
+## Object protection guards (issues #39 and #45)
+
+- Copy and derivation submission and worker execution require `object:download_original` on the source Scope, in addition to existing destination write checks. Revoking this grant while a job is queued prevents original-byte reads and destination writes. Preview-only access does not authorize exported derivations.
+- Version information and version deletion share the same protection check. HEAD legal-hold/retention evidence and exact-version protection APIs remain authoritative even when bucket Object Lock configuration is absent. Active protection and unknown or malformed protection results block deletion.

@@ -81,6 +81,8 @@ pwsh -NoProfile -File scripts/start.ps1
 
 Keep your configuration environment variables set when restarting. API and worker processes can also be started separately from `backend/` with the same absolute data and credential paths.
 
+Copy batches and derived images require the source Scope’s original-download permission, including when a queued worker starts. Preview permission alone does not authorize exporting a full original or a derived image into another Scope. Version deletion checks the exact version’s legal hold and retention even when the bucket has no Object Lock configuration; unknown protection state blocks deletion.
+
 ## Configuration
 
 [.env.example](.env.example) documents the available environment variables. The startup scripts **do not automatically load this file**.

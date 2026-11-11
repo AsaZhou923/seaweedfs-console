@@ -103,7 +103,7 @@ def submit_copy_batch(
     idempotency_key: str,
 ) -> dict[str, Any]:
     initialize(conn)
-    source_scope = core.ensure_scope_permission(conn, source_scope_id, "object:read")
+    source_scope = core.ensure_scope_permission(conn, source_scope_id, "object:download_original")
     raw_items = body.get("items")
     if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= MAX_COPY_ITEMS:
         raise AppError("INVALID_COPY_BATCH", "items must contain 1-60 copy targets.", 422, field="items")
@@ -210,7 +210,7 @@ def _process_item(settings: Any, job: dict[str, Any], batch: dict[str, Any], ite
     stage = "planned"
     try:
         with db.connect(settings) as conn:
-            source_scope = core.ensure_scope_permission(conn, item["source_scope_id"], "object:read")
+            source_scope = core.ensure_scope_permission(conn, item["source_scope_id"], "object:download_original")
             target_scope = core.ensure_scope_permission(conn, item["target_scope_id"], "object:write")
             if source_scope["project_id"] != target_scope["project_id"]:
                 raise AppError("FORBIDDEN_SCOPE", "Copy source and target must be in the same project.", 403)

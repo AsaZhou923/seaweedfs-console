@@ -437,3 +437,82 @@ def test_delete_marker_response_is_not_confirmed_as_permanent_delete(browser, mo
     replay = client.post(url, headers=headers, json=body)
     assert replay.json()["replayed"] is True
     assert len([call for call in s3.calls if "delete" in call]) == 1
+
+
+@pytest.mark.parametrize("version_id", ["v1", "null"])
+@pytest.mark.parametrize("protection,code", [
+    ("hold", "OBJECT_LEGAL_HOLD"),
+    ("retention", "OBJECT_RETENTION_ACTIVE"),
+    ("head_hold", "OBJECT_LEGAL_HOLD"),
+    ("head_retention", "OBJECT_RETENTION_ACTIVE"),
+    ("unknown_hold", "OBJECT_RETENTION_UNKNOWN"),
+    ("malformed_hold", "OBJECT_RETENTION_UNKNOWN"),
+    ("missing_retention_field", "OBJECT_RETENTION_UNKNOWN"),
+    ("malformed_retention", "OBJECT_RETENTION_UNKNOWN"),
+    ("mode_without_date", "OBJECT_RETENTION_UNKNOWN"),
+    ("head_unknown_hold", "OBJECT_RETENTION_UNKNOWN"),
+    ("head_bad_date", "OBJECT_RETENTION_UNKNOWN"),
+])
+def test_version_protection_without_bucket_lock_blocks_info_and_delete(browser, monkeypatch, version_id, protection, code):
+    from datetime import timedelta
+    client, manager, scope, _, s3, _ = browser
+    url, body, headers = writable(browser)
+    body["version_id"] = version_id
+    mutable_conditions(monkeypatch, True)
+    assert s3.lock is False
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    if protection == "hold":
+        s3.hold = "ON"
+    elif protection == "retention":
+        s3.retention = {"Mode": "GOVERNANCE", "RetainUntilDate": future}
+    elif protection == "unknown_hold":
+        s3.hold = None
+    elif protection == "malformed_hold":
+        monkeypatch.setattr(s3, "get_object_legal_hold", lambda **kwargs: {"LegalHold": []})
+    elif protection == "missing_retention_field":
+        monkeypatch.setattr(s3, "get_object_retention", lambda **kwargs: {})
+    elif protection == "malformed_retention":
+        s3.retention = []
+    elif protection == "mode_without_date":
+        s3.retention = {"Mode": "COMPLIANCE"}
+    else:
+        original_head = s3.head_object
+        fields = {"head_hold": {"ObjectLockLegalHoldStatus": "ON"},
+                  "head_retention": {"ObjectLockRetainUntilDate": future},
+                  "head_unknown_hold": {"ObjectLockLegalHoldStatus": None},
+                  "head_bad_date": {"ObjectLockRetainUntilDate": "unknown"}}[protection]
+        monkeypatch.setattr(s3, "head_object", lambda **kwargs: {**original_head(**kwargs), **fields})
+    info = client.get(f"/api/v1/management/{manager['id']}/objects/version-info",
+                      params={"scope_id": scope["id"], "key": body["key"], "version_id": version_id})
+    assert info.status_code == 200, info.text
+    assert info.json()["can_delete"] is False
+    assert info.json()["delete_reason"] == code
+    result = client.post(url, headers=headers, json=body)
+    assert result.status_code == 409, result.text
+    assert result.json()["error"]["code"] == code
+    assert not s3.deleted
+    assert not any("delete" in call for call in s3.calls)
+
+
+@pytest.mark.parametrize("missing_hold", [False, True])
+def test_version_without_bucket_lock_requires_exact_version_protection_reads(browser, monkeypatch, missing_hold):
+    client, manager, scope, _, s3, _ = browser
+    url, body, headers = writable(browser)
+    s3.missing_hold = missing_hold
+    calls = []
+    for name in ("get_object_legal_hold", "get_object_retention"):
+        original = getattr(s3, name)
+        def capture(_name=name, _original=original, **kwargs):
+            calls.append((_name, kwargs))
+            return _original(**kwargs)
+        monkeypatch.setattr(s3, name, capture)
+    info = client.get(f"/api/v1/management/{manager['id']}/objects/version-info",
+                      params={"scope_id": scope["id"], "key": body["key"], "version_id": "v1"})
+    assert info.status_code == 200, info.text
+    assert info.json()["can_delete"] is True
+    result = client.post(url, headers=headers, json=body)
+    assert result.status_code == 200, result.text
+    assert result.json()["status"] == "confirmed"
+    assert len(calls) == 4
+    assert all(target == {"Bucket": scope["bucket"], "Key": body["key"], "VersionId": "v1"}
+               for _, target in calls)
