@@ -134,6 +134,7 @@ def setup_variant(settings):
             "INSERT INTO scopes(id,project_id,connection_id,display_name,bucket,prefix,writable,manage_bucket,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
             ("s", "p", "con", "source", "bucket", "", 1, 1, now, now),
         )
+        conn.execute("UPDATE scopes SET allow_original_download=1 WHERE id='s'")
         conn.execute("INSERT INTO assets(id,project_id,first_seen_at,tags_json) VALUES(?,?,?,?)", ("a", "p", now, "[]"))
         source_checksum = hashlib.sha256(b"source").hexdigest()
         revision = core.make_revision("bucket", "in.jpg", {"etag": '"source-etag"', "size": 6, "last_modified": None, "checksum": source_checksum})
@@ -1353,3 +1354,34 @@ def test_conditional_adapter_read_preserves_exact_version_and_etag(version_id):
     adapter = enhancement_api.S3EnhancementAdapter(s3)
     assert adapter.get_object_bytes_if_match('bucket', 'key', version_id, '"etag"') == b'source'
     assert s3.kwargs == {'Bucket': 'bucket', 'Key': 'key', 'IfMatch': '"etag"', **({'VersionId': version_id} if version_id is not None else {})}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("preview", [False, True])
+def test_derivation_requires_original_grant_before_planning(settings, monkeypatch, batch, preview):
+    request, preset_ids = _setup_batch(settings, monkeypatch)
+    with db.connect(settings) as conn:
+        conn.execute("UPDATE scopes SET allow_original_download=0,allow_preview=? WHERE id='s'", (preview,))
+        conn.execute("UPDATE scopes SET allow_original_download=1 WHERE id='out'")
+    counts = {table: _count(settings, f"SELECT COUNT(*) FROM {table}") for table in ("jobs", "derived_variants", "derived_variant_batches")}
+    body = {"object_id": "o", "preset_id": preset_ids[0], "object_ids": ["o"], "preset_ids": preset_ids, "output_scope_id": "out"}
+    submit = enhancement_api.submit_derived_variant_batch if batch else enhancement_api.submit_derived_variant
+    with pytest.raises(AppError) as error:
+        submit(request, "s", body)
+    assert error.value.code == "FORBIDDEN_SCOPE"
+    for table, count in counts.items():
+        assert _count(settings, f"SELECT COUNT(*) FROM {table}") == count
+
+
+def test_derivation_worker_rechecks_revoked_original_grant(settings, monkeypatch):
+    variant, claimed = setup_variant(settings)
+    with db.connect(settings) as conn:
+        conn.execute("UPDATE scopes SET allow_original_download=0 WHERE id='s'")
+    storage_calls = []
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", lambda *args: storage_calls.append(args))
+    with pytest.raises(AppError) as error:
+        enhancement_api.execute_variant_job(claimed, settings)
+    assert error.value.code == "FORBIDDEN_SCOPE"
+    assert storage_calls == []
+    with db.connect(settings) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM operation_intents WHERE operation_type='derived.put'").fetchone()[0] == 0

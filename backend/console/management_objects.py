@@ -179,40 +179,68 @@ def _mode_from_version_id(version_id):
     return "null" if version_id == "null" else "strong"
 
 
-def _unlocked_version(s3, bucket, key, version_id):
+def _unlocked_version(s3, bucket, key, version_id, head):
+    # Bucket configuration does not establish the protection of an individual
+    # version: SeaweedFS can retain legal holds without a bucket lock config.
+    def unknown(message):
+        raise AppError("OBJECT_RETENTION_UNKNOWN", message, 409)
+
+    def check_hold(status):
+        if status == "ON":
+            raise AppError("OBJECT_LEGAL_HOLD", "指定版本处于 Legal Hold，不能删除", 409)
+        if status != "OFF":
+            unknown("无法核对指定版本的 Legal Hold")
+
+    def check_retention(retention):
+        if not isinstance(retention, dict):
+            unknown("无法核对指定版本的保留状态")
+        if not retention:
+            return
+        until = retention.get("RetainUntilDate")
+        if until is None or retention.get("Mode") not in (None, "GOVERNANCE", "COMPLIANCE"):
+            unknown("无法核对指定版本的保留状态")
+        try:
+            until = datetime.fromisoformat(until.replace("Z", "+00:00")) if isinstance(until, str) else until
+            if not isinstance(until, datetime) or until.tzinfo is None:
+                unknown("无法核对指定版本的保留状态")
+            if until.astimezone(timezone.utc) > datetime.now(timezone.utc):
+                raise AppError("OBJECT_RETENTION_ACTIVE", "指定版本的保留期尚未结束", 409)
+        except (AttributeError, ValueError, TypeError):
+            unknown("无法核对指定版本的保留状态")
+
+    if "ObjectLockLegalHoldStatus" in head:
+        check_hold(head["ObjectLockLegalHoldStatus"])
+    check_retention({field: head[source] for field, source in
+                     (("Mode", "ObjectLockMode"), ("RetainUntilDate", "ObjectLockRetainUntilDate"))
+                     if source in head})
     try:
         config = s3.get_object_lock_configuration(Bucket=bucket)
     except Exception as exc:
-        code = storage._code_from_exception(exc)
-        if code in {"ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration"}:
-            return
-        error = storage.sanitize_storage_exception(exc)
-        raise AppError(error.code, str(error), error.status) from None
-    if config.get("ObjectLockConfiguration", {}).get("ObjectLockEnabled") != "Enabled":
-        raise AppError("OBJECT_RETENTION_UNKNOWN", "无法核对桶的保留能力", 409)
+        if storage._code_from_exception(exc) not in {"ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration"}:
+            error = storage.sanitize_storage_exception(exc)
+            raise AppError(error.code, str(error), error.status) from None
+    else:
+        config = config.get("ObjectLockConfiguration") if isinstance(config, dict) else None
+        if not isinstance(config, dict) or config.get("ObjectLockEnabled") != "Enabled":
+            unknown("无法核对桶的保留能力")
+
     def setting(operation, field, missing_codes, missing_value):
         try:
-            return operation(Bucket=bucket, Key=key, VersionId=version_id).get(field, {})
+            result = operation(Bucket=bucket, Key=key, VersionId=version_id)
         except Exception as exc:
             if storage._code_from_exception(exc) in missing_codes:
                 return missing_value
             error = storage.sanitize_storage_exception(exc)
             raise AppError(error.code, str(error), error.status) from None
+        if not isinstance(result, dict) or not isinstance(result.get(field), dict):
+            unknown("无法核对指定版本的保留状态")
+        return result[field]
+
+    hold = setting(s3.get_object_legal_hold, "LegalHold", {"NoSuchObjectLegalHold"}, {"Status": "OFF"})
+    check_hold(hold.get("Status"))
     retention = setting(s3.get_object_retention, "Retention",
                         {"ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration"}, {})
-    hold = setting(s3.get_object_legal_hold, "LegalHold", {"NoSuchObjectLegalHold"}, {"Status": "OFF"})
-    if hold.get("Status") == "ON":
-        raise AppError("OBJECT_LEGAL_HOLD", "指定版本处于 Legal Hold，不能删除", 409)
-    if hold.get("Status") != "OFF":
-        raise AppError("OBJECT_RETENTION_UNKNOWN", "无法核对指定版本的 Legal Hold", 409)
-    until = retention.get("RetainUntilDate")
-    if until is not None:
-        try:
-            until = datetime.fromisoformat(until.replace("Z", "+00:00")) if isinstance(until, str) else until
-            if until.tzinfo is None or until.astimezone(timezone.utc) > datetime.now(timezone.utc):
-                raise AppError("OBJECT_RETENTION_ACTIVE", "指定版本的保留期尚未结束", 409)
-        except (AttributeError, ValueError, TypeError):
-            raise AppError("OBJECT_RETENTION_UNKNOWN", "无法核对指定版本的保留状态", 409) from None
+    check_retention(retention)
 
 
 def _unlocked_unversioned_bucket(s3, bucket):
@@ -267,11 +295,11 @@ def delete_version(request: Request, management_id: str, body: dict):
         if mode == "strong":
             if fresh["version_id"] != version_id or fresh["etag"] != expected_etag:
                 raise AppError("OBJECT_VERSION_CHANGED", "指定版本身份与确认值不符", 409)
-            _unlocked_version(s3, scope["bucket"], key, version_id)
+            _unlocked_version(s3, scope["bucket"], key, version_id, fresh_head)
         elif mode == "null":
             if fresh["version_id"] != "null" or fresh["etag"] != expected_etag:
                 raise AppError("OBJECT_VERSION_CHANGED", "null 版本身份与确认值不符", 409)
-            _unlocked_version(s3, scope["bucket"], key, "null")
+            _unlocked_version(s3, scope["bucket"], key, "null", fresh_head)
             if not _mutable_delete_supported(request.app.state.settings, scope, fresh_head):
                 raise AppError("MUTABLE_VERSION_DELETE_UNSUPPORTED", "缺少可验证的条件删除能力证据，不能删除 null 版本", 501)
         else:
@@ -337,7 +365,7 @@ def version_info(request: Request, management_id: str, scope_id: str, key: str, 
                 delete_reason = exc.code
         if mode == "strong":
             try:
-                _unlocked_version(s3, scope["bucket"], key, identity.get("version_id"))
+                _unlocked_version(s3, scope["bucket"], key, identity.get("version_id"), head)
                 can_delete = True
             except AppError as exc:
                 delete_reason = exc.code
@@ -350,7 +378,7 @@ def version_info(request: Request, management_id: str, scope_id: str, key: str, 
             elif delete_reason is None:
                 try:
                     if mode == "null":
-                        _unlocked_version(s3, scope["bucket"], key, "null")
+                        _unlocked_version(s3, scope["bucket"], key, "null", head)
                     else:
                         _unlocked_unversioned_bucket(s3, scope["bucket"])
                     if _mutable_delete_supported(request.app.state.settings, scope, head):
