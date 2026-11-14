@@ -438,7 +438,21 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
       <div className="managementGrid browseLayout">
         <DataPanel title={t("Raw Filer files")} loading={files.loading} error={files.error}>
           <label className="field">{t("路径")}<input value={path} onChange={(event) => { setCursor(""); setPath(event.target.value || "/"); }} /></label>
-          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3Target = filerObjectTarget(managementId, child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("Prepare rename")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => selectDeleteTarget({ path: child, is_directory: directory })}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && !protectedPath && s3Target && <a className="buttonLink" href={objectBrowseHref(s3Target)}>{t("Open object")}</a>}</div>]; })} />
+          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => {
+            const name = String(item.name || item.Name || "");
+            const child = selectEntry(item);
+            const directory = Boolean(item.is_directory ?? item.IsDirectory);
+            const protectedPath = Boolean(item.protected) || protectedFilePath(child);
+            const s3Target = filerObjectTarget(managementId, item.s3_object);
+            const s3RawBytes = child.startsWith("/buckets/") && !directory;
+            return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime),
+              <div className="inlineActions">
+                <button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("Prepare rename")}</button>
+                <button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => selectDeleteTarget({ path: child, is_directory: directory })}>{t("选择删除")}</button>
+                {!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}
+                {s3RawBytes && !protectedPath && (s3Target ? <a className="buttonLink" href={objectBrowseHref(s3Target)}>{t("Open object")}</a> : <><span className="hint">{t("Exact object identity is unavailable. Refresh the file listing before opening this object.")}</span><button type="button" onClick={() => setRefreshKey((value) => value + 1)}>{t("Refresh listing")}</button></>)}
+              </div>];
+          })} />
           {!entries.length && <StateRow label="Files" value={files.data ? t("空响应") : t("未知")} state={files.data ? "empty_response" : "unknown"} />}
           <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={nextCursor ? t("有下一页") : t("无下一页或未知")} />
         </DataPanel>

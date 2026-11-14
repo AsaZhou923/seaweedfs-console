@@ -241,6 +241,8 @@ The SPA accepts `#objects?management=<id>&bucket=<bucket>` and an optional `key`
 
 Object browsing uses `GET /management/{id}/objects`. A Filer object handoff selects the exact key through `POST /management/{id}/objects/select`, and downloads use `GET /management/{id}/objects/download` with the resolved `scope_id`. The backend applies connection binding, Scope membership, and action permission checks on each call. The browser presents discovery failures and absent configuration separately from successful empty listings.
 
+Filer file entries carry an `s3_object` identity with literal `bucket` and `key` values derived from the original upstream path. Canonical `full_path` fields continue to serve native Filer controls. The S3 handoff consumes the explicit identity, preserving trailing spaces, repeated slashes, and encoded-looking characters. A missing identity produces a reload prerequisite.
+
 ## Object protection guards (issues #39 and #45)
 
 - Copy and derivation submission and worker execution require `object:download_original` on the source Scope, in addition to existing destination write checks. Revoking this grant while a job is queued prevents original-byte reads and destination writes. Preview-only access does not authorize exported derivations.

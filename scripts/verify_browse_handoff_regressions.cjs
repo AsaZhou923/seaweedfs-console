@@ -17,7 +17,9 @@ const managers = [
 const scopeA = { id: "scope-a", project_id: "project-a", connection_id: "s3-a", display_name: "Scope A", bucket: "bucket-a", prefix: "a/", writable: false, allow_preview: true, allow_original_download: true };
 const scopeB = { id: "scope-b", project_id: "project-b", connection_id: "s3-a", display_name: "Scope B", bucket: "bucket-b", prefix: "literal", writable: false, allow_preview: true, allow_original_download: true };
 const scopeOther = { ...scopeB, id: "scope-other", connection_id: "s3-b", display_name: "Other connection scope" };
-const trickyKey = "literal2026//子目录/space +%25?#.jpg";
+const trickyKey = "literal2026//子目录/space +%25?#.jpg ";
+const canonicalFilerPath = "/buckets/bucket-b/literal2026/子目录/space +%25?#.jpg";
+const filerName = trickyKey.slice(trickyKey.lastIndexOf("/") + 1);
 
 function gate(match) {
   let release;
@@ -50,6 +52,7 @@ async function startMock(options = {}) {
     scopes: { "project-a": options.alternateScope ? [scopeA, { ...scopeB, id: "scope-alternate", project_id: "project-a", display_name: "Alternate scope" }] : [scopeA], "project-b": options.withScope ? [{ ...scopeB, allow_original_download: options.download !== false }, scopeOther] : [] },
     requests: [], gates: options.hold ? [gate(options.hold)] : [], failScopes: Boolean(options.failScopes), failObjects: Boolean(options.failObjects), empty: Boolean(options.empty),
     authenticated: options.authenticated !== false,
+    objectIdentity: options.objectIdentity !== false,
   };
   const server = http.createServer(async (req, res) => {
     try {
@@ -94,7 +97,9 @@ async function startMock(options = {}) {
       } else if (request.path.endsWith("/buckets")) {
         response = { items: [{ name: "bucket-a" }, { name: "bucket-b" }] };
       } else if (request.path.endsWith("/files")) {
-        response = { items: [{ name: trickyKey, full_path: `/buckets/bucket-b/${trickyKey}`, is_directory: false, size: 12 }], next_cursor: "" };
+        const entry = { name: filerName, full_path: canonicalFilerPath, is_directory: false, size: 12 };
+        if (state.objectIdentity) entry.s3_object = { bucket: "bucket-b", key: trickyKey };
+        response = { items: [entry], next_cursor: "" };
       } else if (request.path.endsWith("/objects/select")) {
         response = { object: { id: `object-${payload.scope_id}`, key: payload.key, scope_id: payload.scope_id, version_id: "version-1", size: 12 } };
       } else if (request.path.endsWith("/objects")) {
@@ -194,12 +199,12 @@ async function run() {
     });
 
     await scenario("filer_handoff_preserves_exact_key_and_scoped_download", "files", { withScope: true }, async (page, { state, base }) => {
-      const row = page.getByRole("table", { name: "Filer directory entries" }).getByRole("row").filter({ hasText: trickyKey });
+      const row = page.getByRole("table", { name: "Filer directory entries" }).getByRole("row").filter({ hasText: filerName });
       const open = row.getByRole("link", { name: "Open object", exact: true });
       const href = new URL(await open.getAttribute("href"), base);
       const query = new URLSearchParams(href.hash.split("?")[1]);
       assert.equal(query.get("bucket"), "bucket-b");
-      assert.equal(query.get("key"), trickyKey, "Filer handoff must preserve percent, plus, repeated slash, Unicode, query and hash characters");
+      assert.equal(query.get("key"), trickyKey, "Filer handoff must preserve the literal identity including trailing space, percent, plus, repeated slash, Unicode, query and hash characters");
       assert.equal(await row.locator('a[href*="/files/download"]').count(), 0, "S3 bytes must use the scoped object endpoint");
       await row.getByRole("button", { name: "Prepare rename", exact: true }).waitFor();
       await open.click();
@@ -212,6 +217,26 @@ async function run() {
         assert.equal(url.searchParams.get("key"), trickyKey);
         assert.equal(url.searchParams.get("scope_id"), "scope-b");
       }
+    });
+
+    await scenario("filer_without_literal_identity_requires_fresh_listing", "files", { withScope: true, objectIdentity: false }, async (page, { state, base }) => {
+      const row = page.getByRole("table", { name: "Filer directory entries" }).getByRole("row").filter({ hasText: filerName });
+      await row.getByText("Exact object identity is unavailable. Refresh the file listing before opening this object.", { exact: true }).waitFor();
+      assert.equal(await row.getByRole("link", { name: "Open object", exact: true }).count(), 0, "normalized paths cannot substitute for missing literal identity");
+      assert.equal(await row.locator('a[href*="/files/download"]').count(), 0, "missing identity cannot enable raw S3 downloads");
+      assert.equal(await row.locator('a[href*="#objects"]').count(), 0, "missing identity cannot infer a bucket or key from the normalized path");
+      const before = state.requests.filter((request) => request.path.endsWith("/files")).length;
+      state.objectIdentity = true;
+      await row.getByRole("button", { name: "Refresh listing", exact: true }).click();
+      const open = row.getByRole("link", { name: "Open object", exact: true });
+      await open.waitFor();
+      assert.ok(state.requests.filter((request) => request.path.endsWith("/files")).length > before, "recovery re-reads the authoritative file listing");
+      const href = new URL(await open.getAttribute("href"), base);
+      const query = new URLSearchParams(href.hash.split("?")[1]);
+      assert.equal(query.get("management"), "manager-a");
+      assert.equal(query.get("bucket"), "bucket-b");
+      assert.equal(query.get("key"), trickyKey, "refreshed identity must retain the literal key");
+      assert.equal(state.requests.some((request) => request.path.endsWith("/objects/select")), false, "refresh alone cannot select an inferred key");
     });
 
     await scenario("scope_setup_prefills_target_and_returns_to_bucket", objectLocation(), {}, async (page, { state }) => {

@@ -1,4 +1,6 @@
 export const managementMessages: Record<string, { en: string; "zh-CN": string }> = {
+  "Exact object identity is unavailable. Refresh the file listing before opening this object.": { en: "Exact object identity is unavailable. Refresh the file listing before opening this object.", "zh-CN": "无法确定精确对象标识。请刷新文件列表后再打开此对象。" },
+  "Refresh listing": { en: "Refresh listing", "zh-CN": "刷新文件列表" },
   "Create or select a management connection linked to the S3 service for this bucket.": { en: "Create or select a management connection linked to the S3 service for this bucket.", "zh-CN": "请创建或选择已关联此桶所属 S3 服务的管理连接。" },
   "Browse using {connection}": { en: "Browse using {connection}", "zh-CN": "通过 {connection} 浏览" },
   "Browse bucket contents or select Configuration to inspect its settings.": { en: "Browse bucket contents or select Configuration to inspect its settings.", "zh-CN": "浏览桶内文件，或选择配置以查看桶设置。" },

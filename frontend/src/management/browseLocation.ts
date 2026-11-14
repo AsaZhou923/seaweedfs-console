@@ -15,10 +15,9 @@ export function objectBrowseHref(target: ObjectBrowseTarget, setup = false) {
   return `#${setup ? "settings" : "objects"}?${params.toString()}`;
 }
 
-export function filerObjectTarget(managementId: string, path: string): ObjectBrowseTarget | undefined {
-  if (!path.startsWith("/buckets/")) return undefined;
-  const remainder = path.slice("/buckets/".length);
-  const separator = remainder.indexOf("/");
-  if (separator < 1 || separator === remainder.length - 1) return undefined;
-  return { managementId, bucket: remainder.slice(0, separator), key: remainder.slice(separator + 1) };
+export function filerObjectTarget(managementId: string, identity: unknown): ObjectBrowseTarget | undefined {
+  if (!identity || typeof identity !== "object" || Array.isArray(identity)) return undefined;
+  const { bucket, key } = identity as Record<string, unknown>;
+  if (typeof bucket !== "string" || !bucket || bucket.includes("/") || typeof key !== "string" || !key) return undefined;
+  return { managementId, bucket, key };
 }

@@ -608,6 +608,84 @@ def test_files_read_requires_auth_roots_hides_system_paths_and_uses_cookie_free_
     assert filer_requests and "cookie" not in filer_requests[0].headers
 
 
+@pytest.mark.parametrize(
+    ("parent", "entry", "canonical_path", "expected_name", "expected_key"),
+    [
+        (
+            "/buckets/photos/prefix",
+            {"FullPath": "/buckets/photos/prefix//子目录/space +%25?#.jpg "},
+            "/buckets/photos/prefix/子目录/space +%25?#.jpg",
+            "space +%25?#.jpg ",
+            "prefix//子目录/space +%25?#.jpg ",
+        ),
+        (
+            "/buckets/photos/prefix",
+            {"Name": "space +%25?#.jpg "},
+            "/buckets/photos/prefix/space +%25?#.jpg",
+            "space +%25?#.jpg ",
+            "prefix/space +%25?#.jpg ",
+        ),
+        (
+            "/buckets/photos/prefix",
+            {"name": " leading space.jpg "},
+            "/buckets/photos/prefix/ leading space.jpg",
+            " leading space.jpg ",
+            "prefix/ leading space.jpg ",
+        ),
+        (
+            "/buckets/photos",
+            {"FullPath": "/buckets/photos/exact//key ", "Name": "display-name"},
+            "/buckets/photos/exact/key",
+            "display-name",
+            "exact//key ",
+        ),
+    ],
+)
+def test_files_exposes_literal_s3_identity_separately_from_canonical_filer_path(
+    api, monkeypatch, parent, entry, canonical_path, expected_name, expected_key,
+):
+    client, settings, csrf, _native = api
+    conn = create_connection(client, settings, csrf)
+    monkeypatch.setattr(management_native, "_native_json", lambda *_args: {"Path": parent, "Entries": [entry]})
+
+    response = client.get(f"/api/v1/management/{conn['id']}/files", params={"path": parent})
+
+    assert response.status_code == 200, response.text
+    item, = response.json()["items"]
+    assert item["full_path"] == item["FullPath"] == canonical_path
+    assert item["name"] == item["Name"] == expected_name
+    assert item["s3_object"] == {"bucket": "photos", "key": expected_key}
+    assert item["protected"] is False
+
+
+def test_files_literal_s3_identity_keeps_directory_and_protected_path_guards(api, monkeypatch):
+    client, settings, csrf, _native = api
+    conn = create_connection(client, settings, csrf)
+    entries = [
+        {"FullPath": "/buckets/photos/folder/", "IsDirectory": True},
+        {"FullPath": "/etc/secret"},
+        {"FullPath": "/buckets/photos/../secret"},
+        {"FullPath": "/buckets/photos/%252e%252e/secret"},
+        {"FullPath": "/buckets/photos/bad\\key"},
+        {"FullPath": ["/buckets/photos/key"]},
+        {"FullPath": " /buckets/photos/ambiguous "},
+        {"FullPath": "/buckets//photos/ambiguous"},
+    ]
+    monkeypatch.setattr(management_native, "_native_json", lambda *_args: {"Path": "/", "Entries": entries})
+
+    response = client.get(f"/api/v1/management/{conn['id']}/files", params={"path": "/"})
+
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert [item["full_path"] for item in items] == [
+        "/buckets/photos/folder", "/etc/secret", "/buckets/photos/ambiguous", "/buckets/photos/ambiguous",
+    ]
+    assert items[0]["name"] == "folder"
+    assert items[0]["is_directory"] is True
+    assert items[1]["protected"] is True
+    assert all("s3_object" not in item for item in items)
+
+
 def test_files_next_cursor_requires_upstream_more_flag_and_preserves_last_name_when_items_filtered(api):
     client, settings, csrf, native = api
     conn = create_connection(client, settings, csrf)
