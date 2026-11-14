@@ -310,6 +310,8 @@ nav a:hover:not(.active) {
 
 .panel > * { min-width: 0; }
 
+.browseTarget code { overflow-wrap: anywhere; white-space: pre-wrap; }
+
 .panel h2,
 .panel h3 { margin: 0; line-height: 1.4; }
 

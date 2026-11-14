@@ -235,6 +235,12 @@ Admin OIDC、Enterprise 集中监控/管理审计、PITR 等不冒充 OSS 功能
 
 容量快照新未测字段保存null；旧快照raw值保留，以legacy_unknown/measurement在返回与阈值中屏蔽。无完整扫描的source、未测temporary/version、缺output_size的派生不能显示已测零值。真实超阈值加未知字段返回alerting并附unknown_fields；纯未测返回unknown。
 
+## Browser handoff for buckets and Filer objects
+
+The SPA accepts `#objects?management=<id>&bucket=<bucket>` and an optional `key` parameter, encoded with `URLSearchParams`. Explicit handoffs resolve authorized project Scopes through the existing project/Scope APIs, matching `s3_connection_id`, bucket, and the literal prefix of a requested key. A missing matching Scope opens a contextual Settings handoff for explicit configuration.
+
+Object browsing uses `GET /management/{id}/objects`. A Filer object handoff selects the exact key through `POST /management/{id}/objects/select`, and downloads use `GET /management/{id}/objects/download` with the resolved `scope_id`. The backend applies connection binding, Scope membership, and action permission checks on each call. The browser presents discovery failures and absent configuration separately from successful empty listings.
+
 ## Object protection guards (issues #39 and #45)
 
 - Copy and derivation submission and worker execution require `object:download_original` on the source Scope, in addition to existing destination write checks. Revoking this grant while a job is queued prevents original-byte reads and destination writes. Preview-only access does not authorize exported derivations.

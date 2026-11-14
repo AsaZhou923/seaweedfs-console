@@ -5,6 +5,7 @@ import { t, translateMessage, useLocale } from "./i18n";
 import { LanguageSelector } from "./i18n/LanguageSelector";
 import { ResultSummary, StructuredResult as ApiStructuredResult } from "./components/ResultSummary";
 import { ManagementConnectionSelector, ManagementRoute, ManagementSettings, isManagementRoute, managementTitle, type ManagementConnection, type StorageScopeOption } from "./management/ManagementViews";
+import { objectBrowseHref, readBrowseTarget } from "./management/browseLocation";
 
 type Requester = <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
 type Project = { id: string; project_key?: string; display_name: string; description?: string; scopes?: Scope[] };
@@ -107,7 +108,9 @@ function App() {
   const [scopes, setScopes] = useState<Scope[]>([]);
   const [projectId, setProjectId] = useState("");
   const [scopeId, setScopeId] = useState("");
-  const [route, setRoute] = useState(location.hash.replace("#", "") || "dashboard");
+  const [routeHash, setRouteHash] = useState(location.hash);
+  const route = routeHash.replace(/^#/, "").split("?")[0] || "dashboard";
+  const browseTarget = readBrowseTarget(routeHash);
   const [deriveObjectIds, setDeriveObjectIds] = useState<string[]>([]);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [operationTab, setOperationTab] = useState("copy");
@@ -286,7 +289,8 @@ function App() {
       const result = await request<{ items: ManagementConnection[] }>("/management/connections");
       const items = result.items || [];
       setManagementConnections(items);
-      setManagementId((current) => current && items.some((item) => item.id === current) ? current : items[0]?.id || "");
+      const requested = readBrowseTarget(location.hash)?.managementId;
+      setManagementId((current) => requested ? items.find((item) => item.id === requested)?.id || "" : current && items.some((item) => item.id === current) ? current : items[0]?.id || "");
     } catch (err) {
       if (isSessionExpiredMessage(err)) return;
       if (isStaleAuthMessage(err)) return;
@@ -299,10 +303,14 @@ function App() {
   }
 
   useEffect(() => {
-    const onHash = () => setRoute(location.hash.replace("#", "") || "dashboard");
+    const onHash = () => setRouteHash(location.hash);
     addEventListener("hashchange", onHash);
     return () => removeEventListener("hashchange", onHash);
   }, []);
+
+  useEffect(() => {
+    if (browseTarget && !managementLoading) setManagementId(managementConnections.find((item) => item.id === browseTarget.managementId)?.id || "");
+  }, [routeHash, managementConnections, managementLoading]);
 
   useEffect(() => {
     refresh({ bootstrap: true }).catch((err) => {
@@ -386,12 +394,12 @@ function App() {
             <ManagementConnectionSelector
               connections={managementConnections}
               value={managementId}
-              onChange={setManagementId}
+              onChange={(id) => { setManagementId(id); if (browseTarget && route === "objects") location.hash = objectBrowseHref({ ...browseTarget, managementId: id }); }}
               onRefresh={() => refreshManagementConnections().catch((err) => setError(String(err.message || err)))}
               compact
             />
           )}
-          {(imageRoute || route === "objects") && <div className="contextBar">
+          {(imageRoute || (route === "objects" && !browseTarget)) && <div className="contextBar">
             <label className="field compact">
               {t("项目")}
               <select value={projectId} onChange={(event) => selectProject(event.target.value)}>
@@ -409,13 +417,13 @@ function App() {
           </div>}
         </header>
         {error && <div className="notice error">{translateMessage(error)}<button onClick={() => setError("")}>×</button></div>}
-        {managementRoute && (managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={selectScope} onObjectSelected={(objectId) => { setSelectedObjectIds(objectId ? [objectId] : []); if (objectId) setOperationTab("object"); }} />)}
+        {managementRoute && (managementLoading || Boolean(browseTarget && managementId !== browseTarget.managementId && managementConnections.some((item) => item.id === browseTarget.managementId)) ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={selectScope} projects={projects} browseTarget={browseTarget} onBrowseScope={(selected) => { if (selected.project_id) selectProject(selected.project_id); selectScope(selected.id); }} onObjectSelected={(objectId) => { setSelectedObjectIds(objectId ? [objectId] : []); if (objectId) setOperationTab("object"); }} />)}
         {route === "assets" && <Assets request={request} scopeId={scopeId} projectId={projectId} onSelectionChange={setSelectedObjectIds} sendToOperationsCopy={(ids) => { setSelectedObjectIds(ids); setOperationTab("copy"); location.hash = "operations"; }} sendToPresets={(ids) => { setDeriveObjectIds(ids); location.hash = "presets"; }} />}
         {route === "scans" && <Scans request={request} scopeId={scopeId} onChanged={() => refreshScopes(projectId)} />}
         {route === "diagnostics" && <Diagnostics request={request} scopeId={scopeId} />}
         {route === "operations" && <Operations request={request} scopeId={scopeId} scope={scope} sourceObjectIds={selectedObjectIds} initialTab={operationTab} />}
         {route === "presets" && <Presets request={request} projectId={projectId} scopeId={scopeId} initialObjectIds={deriveObjectIds} />}
-        {route === "settings" && <Settings request={request} projects={projects} connections={connections} managementConnections={managementConnections} refresh={refresh} refreshManagementConnections={refreshManagementConnections} projectId={projectId} setProjectId={selectProject} />}
+        {route === "settings" && (browseTarget && managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <Settings key={routeHash} request={request} projects={projects} connections={connections} managementConnections={managementConnections} refresh={refresh} refreshManagementConnections={refreshManagementConnections} projectId={projectId} setProjectId={selectProject} />)}
       </main>
     </div>
   );
@@ -1428,17 +1436,20 @@ function Presets({ request, projectId, scopeId, initialObjectIds }: { request: R
 }
 
 function Settings({ request, projects, connections, managementConnections, refresh, refreshManagementConnections, projectId, setProjectId }: { request: Requester; projects: Project[]; connections: Connection[]; managementConnections: ManagementConnection[]; refresh: () => Promise<void>; refreshManagementConnections: () => Promise<void>; projectId: string; setProjectId: (value: string) => void }) {
+  const setupTarget = typeof location !== "undefined" && new URLSearchParams(location.hash.split("?")[1] || "").get("setup") === "scope" ? readBrowseTarget(location.hash) : undefined;
+  const setupConnection = managementConnections.find((item) => item.id === setupTarget?.managementId);
   const [conn, setConn] = useState({ display_name: "SeaweedFS test", endpoint_url: "http://127.0.0.1:8333", region: "us-east-1", secret_ref: "server-test", addressing_style: "path", verify_tls: false });
   const [project, setProject] = useState({ project_key: "images", display_name: "Images", description: "" });
-  const [scope, setScope] = useState({ connection_id: "", display_name: "Images scope", bucket: "archive", prefix: "", allow_preview: true, allow_original_download: true, writable: false, manage_bucket: false });
-  const [tab, setTab] = useState<"management" | "images">("management");
+  const [scope, setScope] = useState({ connection_id: setupConnection?.s3_connection_id || "", display_name: setupTarget?.bucket || "Images scope", bucket: setupTarget?.bucket || "archive", prefix: setupTarget?.key?.slice(0, setupTarget.key.lastIndexOf("/") + 1) || "", allow_preview: true, allow_original_download: true, writable: false, manage_bucket: false });
+  const [tab, setTab] = useState<"management" | "images">(setupConnection?.s3_connection_id ? "images" : "management");
   const [error, setError] = useState("");
 
-  async function save(fn: () => Promise<void>) {
+  async function save(fn: () => Promise<void>, returnToBrowse = false) {
     setError("");
     try {
       await fn();
       await refresh();
+      if (returnToBrowse && setupTarget) location.hash = objectBrowseHref(setupTarget);
     } catch (err) {
       setError(String((err as Error).message));
     }
@@ -1446,11 +1457,13 @@ function Settings({ request, projects, connections, managementConnections, refre
 
   return (
     <section className="panel">
+      {setupTarget && <div className="notice browseTarget"><strong>{t("Requested bucket")}</strong>{" "}<code>{setupTarget.bucket}</code>{setupTarget.key !== undefined && <p><code>{setupTarget.key}</code></p>}<p>{t("Configure the linked S3 connection and an authorized scope, then return to this bucket.")}</p><a className="buttonLink" href={objectBrowseHref(setupTarget)}>{t("Return to requested bucket")}</a></div>}
+      {setupTarget && !setupConnection?.s3_connection_id && <div className="notice"><p>{t("Create or select a management connection linked to the S3 service for this bucket.")}</p><div className="toolbar">{managementConnections.filter((item) => item.s3_connection_id).map((item) => <a key={item.id} className="buttonLink" href={objectBrowseHref({ ...setupTarget, managementId: item.id })}>{t("Browse using {connection}", { connection: item.name })}</a>)}</div></div>}
       <div className="tabs">
         <button className={tab === "management" ? "active" : "secondary"} onClick={() => setTab("management")}>{t("Management Connection")}</button>
         <button className={tab === "images" ? "active" : "secondary"} onClick={() => setTab("images")}>{t("Project Scope")}</button>
       </div>
-      {tab === "management" && <ManagementSettings request={request} s3Connections={connections} managementConnections={managementConnections} refreshConnections={refreshManagementConnections} />}
+      {tab === "management" && <ManagementSettings request={request} s3Connections={connections} managementConnections={managementConnections} refreshConnections={refreshManagementConnections} initialManagementId={setupTarget?.managementId} />}
       {tab === "images" && <div className="grid3 settingsGrid">
         <div>
           <h2>{t("S3 连接")}</h2>
@@ -1471,6 +1484,7 @@ function Settings({ request, projects, connections, managementConnections, refre
         </div>
         <div>
           <h2>{t("Scope")}</h2>
+          {setupTarget && <label className="field">{t("项目")}<select value={projectId} onChange={(event) => setProjectId(event.target.value)}>{projects.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>}
           <label className="field">{t("连接")}<select value={scope.connection_id} onChange={(event) => setScope({ ...scope, connection_id: event.target.value })}>{connections.map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}</select></label>
           <label className="field">{t("显示名")}<input value={scope.display_name} onChange={(event) => setScope({ ...scope, display_name: event.target.value })} /></label>
           <label className="field">{t("Bucket")}<input value={scope.bucket} onChange={(event) => setScope({ ...scope, bucket: event.target.value })} /></label>
@@ -1479,9 +1493,9 @@ function Settings({ request, projects, connections, managementConnections, refre
           <label><input type="checkbox" checked={scope.allow_original_download} onChange={(event) => setScope({ ...scope, allow_original_download: event.target.checked })} /> {t("允许原图下载")}</label>
           <label><input type="checkbox" checked={scope.writable} onChange={(event) => setScope({ ...scope, writable: event.target.checked })} /> {t("可写 scope")}</label>
           <label><input type="checkbox" checked={scope.manage_bucket} onChange={(event) => setScope({ ...scope, manage_bucket: event.target.checked })} /> {t("管理桶配置")}</label>
-          <button disabled={!projectId || connections.length === 0} onClick={() => save(async () => {
+          <button disabled={!projectId || connections.length === 0 || Boolean(setupTarget && (!setupConnection?.s3_connection_id || scope.connection_id !== setupConnection.s3_connection_id))} onClick={() => save(async () => {
             await request(`/projects/${projectId}/scopes`, { method: "POST", body: JSON.stringify({ connection_id: scope.connection_id || connections[0]?.id, display_name: scope.display_name, bucket: scope.bucket, prefix: scope.prefix, scope_kind: "source", writable: scope.writable, manage_bucket: scope.manage_bucket, scope_policy: { allow_preview: scope.allow_preview, allow_original_download: scope.allow_original_download }, overlap_ack: true }) });
-          })}>{t("添加范围")}</button>
+          }, true)}>{t("添加范围")}</button>
           <p className="hint">{t("Secret Ref 只保存服务端引用；前端不会接收或展示密钥。")}</p>
         </div>
       </div>}
