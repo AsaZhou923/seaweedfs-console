@@ -99,6 +99,14 @@
   - Project Scope routes use project/scope selectors and object authorization.
   - Do not mix the selectors: management topology should not depend on an image project, and image operations should not silently inherit all control-plane authority.
 
+### Bucket and Filer browsing handoff
+
+- Bucket inventory provides prominent Browse files and Configuration actions. Browsing carries the selected management connection and bucket into Live Objects.
+- An explicit bucket request resolves Scopes across accessible projects using the linked S3 connection and exact bucket. A requested object additionally requires a matching literal key prefix.
+- Missing linkage, Scope discovery in progress, discovery failure, missing scoped access, and an observed empty listing each have distinct UI states. The setup handoff retains the requested bucket and connection and returns after explicit Scope creation.
+- Filer S3 files open the scoped object browser with their exact keys. Rename preparation has its own label. Original-download permission controls download availability, and read-only management connections support browsing.
+- Browser locations carry identifiers and literal object keys. Each backend request enforces authorization. Scope resolution and object results are invalidated when their connection or requested target changes.
+
 ## Design principles
 
 - Principle 1: Official Admin parity first, image workflow second. The product should answer "what is my SeaweedFS doing?" before "how do I process these images?"

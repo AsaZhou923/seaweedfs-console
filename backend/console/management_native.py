@@ -1058,19 +1058,24 @@ def _safe_entry(entry: Any, parent: str) -> dict[str, Any] | None:
         return None
     raw_path = entry.get("FullPath") or entry.get("full_path")
     raw_name = entry.get("Name") or entry.get("name")
+    literal_path = None
     if raw_path:
+        if isinstance(raw_path, str):
+            literal_path = raw_path
         try:
             full_path = _canonical_path(str(raw_path))
         except AppError:
             return None
     elif raw_name:
+        if isinstance(raw_name, str):
+            literal_path = (parent.rstrip("/") + "/" + raw_name) if parent != "/" else "/" + raw_name
         try:
             full_path = _canonical_path((parent.rstrip("/") + "/" + str(raw_name)) if parent != "/" else "/" + str(raw_name))
         except AppError:
             return None
     else:
         return None
-    name = raw_name or full_path.rstrip("/").rsplit("/", 1)[-1] or "/"
+    name = raw_name or (literal_path or full_path).rstrip("/").rsplit("/", 1)[-1] or "/"
     mode = entry.get("Mode") if "Mode" in entry else entry.get("mode")
     try:
         mode_int = int(mode) if mode is not None else 0
@@ -1081,7 +1086,7 @@ def _safe_entry(entry: Any, parent: str) -> dict[str, Any] | None:
     size = entry.get("FileSize", entry.get("file_size", attributes.get("FileSize", attributes.get("file_size"))))
     mtime = entry.get("Mtime", entry.get("mtime", attributes.get("Mtime", attributes.get("mtime"))))
     safe_name = str(name)
-    return {
+    item = {
         "name": safe_name,
         "Name": safe_name,
         "full_path": full_path,
@@ -1095,6 +1100,11 @@ def _safe_entry(entry: Any, parent: str) -> dict[str, Any] | None:
         "Mtime": mtime,
         "protected": _protected(full_path),
     }
+    if not is_directory and not item["protected"] and literal_path and literal_path.startswith("/buckets/"):
+        bucket, separator, key = literal_path[len("/buckets/"):].partition("/")
+        if bucket and separator and key:
+            item["s3_object"] = {"bucket": bucket, "key": key}
+    return item
 
 
 @router.get("/{management_id}/files")

@@ -120,3 +120,4 @@ jobs:
           SWC_VERIFY_OPERATIONS_HANDOFF=1 node scripts/verify_management_context_regressions.cjs
           node scripts/verify_maintenance_target_regressions.cjs
           node scripts/verify_iam_inventory_regressions.cjs
+          node scripts/verify_browse_handoff_regressions.cjs

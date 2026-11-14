@@ -1,6 +1,7 @@
 import React, { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ResultSummary, StructuredResult } from "../components/ResultSummary";
 import { t, translateMessage, useLocale } from "../i18n";
+import { filerObjectTarget, objectBrowseHref, type ObjectBrowseTarget } from "./browseLocation";
 
 export type Requester = <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -66,9 +67,10 @@ export function ManagementConnectionSelector({ connections, value, onChange, onR
   );
 }
 
-export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void }) {
+export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected, projects = [], browseTarget, onBrowseScope }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void; projects?: { id: string }[]; browseTarget?: ObjectBrowseTarget; onBrowseScope?: (scope: StorageScopeOption) => void }) {
   useLocale();
   const connection = connections.find((item) => item.id === managementId);
+  if (browseTarget && (!connection || managementId !== browseTarget.managementId)) return <section className="panel"><p className="notice error">{t("The requested management connection is unavailable.")}</p><code>{browseTarget.managementId}</code><a className="buttonLink" href={objectBrowseHref(browseTarget, true)}>{t("Configure scoped access")}</a></section>;
   if (!managementId) {
     return (
       <section className="panel managementPage">
@@ -85,22 +87,22 @@ export function ManagementRoute({ route, request, managementId, connections, s3C
   if (route === "storage") return <StoragePage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "buckets") return <BucketsPage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "files") return <FilesPage key={managementId} request={request} managementId={managementId} connection={connection} />;
-  if (route === "objects") return <ObjectsPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} />;
+  if (route === "objects") return <ObjectsPage key={JSON.stringify([managementId, browseTarget])} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} projects={projects} browseTarget={browseTarget} onBrowseScope={onBrowseScope} />;
   if (route === "iam") return <IamPage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "maintenance") return <MaintenancePage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "services") return <ServicesPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} />;
   return <DashboardPage key={managementId} request={request} managementId={managementId} />;
 }
 
-export function ManagementSettings({ request, s3Connections, managementConnections, refreshConnections }: { request: Requester; s3Connections: S3ConnectionOption[]; managementConnections: ManagementConnection[]; refreshConnections: () => Promise<void> }) {
+export function ManagementSettings({ request, s3Connections, managementConnections, refreshConnections, initialManagementId }: { request: Requester; s3Connections: S3ConnectionOption[]; managementConnections: ManagementConnection[]; refreshConnections: () => Promise<void>; initialManagementId?: string }) {
   useLocale();
-  const [selectedId, setSelectedId] = useState(managementConnections[0]?.id || "");
-  const selected = managementConnections.find((item) => item.id === selectedId) || managementConnections[0];
+  const [selectedId, setSelectedId] = useState(initialManagementId || managementConnections[0]?.id || "");
+  const selected = managementConnections.find((item) => item.id === selectedId) || (initialManagementId ? undefined : managementConnections[0]);
 
   useEffect(() => {
-    if (!selectedId && managementConnections[0]) setSelectedId(managementConnections[0].id);
-    if (selectedId && !managementConnections.some((item) => item.id === selectedId)) setSelectedId(managementConnections[0]?.id || "");
-  }, [managementConnections, selectedId]);
+    if (!selectedId && !initialManagementId && managementConnections[0]) setSelectedId(managementConnections[0].id);
+    if (selectedId && !managementConnections.some((item) => item.id === selectedId)) setSelectedId(initialManagementId ? "" : managementConnections[0]?.id || "");
+  }, [managementConnections, selectedId, initialManagementId]);
 
   return (
     <div className="stack">
@@ -264,8 +266,8 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   return (
     <section className="managementPage">
         <DataPanel title={t("Bucket inventory")} loading={buckets.loading} error={buckets.error}>
-          <p className="hint">{t("Select a bucket to inspect its status and edit its configuration below.")}</p>
-          <DataTable caption="SeaweedFS buckets" columns={["Bucket", "Owner", "Logical", "Physical", "Versioning", "Lifecycle", "Policy"]} rows={rows.map((item) => [<button type="button" className="linkButton" onClick={() => setSelected(String(item.name || ""))}>{displayValue(item.name)}</button>, displayValue(item.owner), formatBytesOrUnknown(item.logical_size), formatBytesOrUnknown(item.physical_size), displayValue(item.versioning_status || "未知"), displayValue(item.lifecycle_rule_count), displayValue(item.policy_statement_count)])} />
+          <p className="hint">{t("Browse bucket contents or select Configuration to inspect its settings.")}</p>
+          <DataTable caption="SeaweedFS buckets" columns={["Bucket", "Owner", "Logical", "Physical", "Versioning", "Lifecycle", "Policy", "Actions"]} rows={rows.map((item) => [<button type="button" className="linkButton" onClick={() => setSelected(String(item.name || ""))}>{displayValue(item.name)}</button>, displayValue(item.owner), formatBytesOrUnknown(item.logical_size), formatBytesOrUnknown(item.physical_size), displayValue(item.versioning_status || "未知"), displayValue(item.lifecycle_rule_count), displayValue(item.policy_statement_count), <div className="inlineActions"><a className="buttonLink" href={objectBrowseHref({ managementId, bucket: String(item.name || "") })}>{t("Browse files")}</a><button type="button" onClick={() => setSelected(String(item.name || ""))}>{t("Configuration")}</button></div>])} />
           {!rows.length && <StateRow label="Bucket dynamic inventory" value={buckets.data ? t("空响应；不代表静态 S3 identity 为 0") : t("未知")} state={buckets.data ? "empty_response" : "unknown"} />}
         </DataPanel>
         <details className="panel actionDisclosure">
@@ -436,7 +438,21 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
       <div className="managementGrid browseLayout">
         <DataPanel title={t("Raw Filer files")} loading={files.loading} error={files.error}>
           <label className="field">{t("路径")}<input value={path} onChange={(event) => { setCursor(""); setPath(event.target.value || "/"); }} /></label>
-          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => { const name = String(item.name || item.Name || ""); const child = selectEntry(item); const directory = Boolean(item.is_directory ?? item.IsDirectory); const protectedPath = Boolean(item.protected) || protectedFilePath(child); const s3RawBytes = child.startsWith("/buckets/") && !directory; return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime), <div className="inlineActions"><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("选择")}</button><button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => selectDeleteTarget({ path: child, is_directory: directory })}>{t("选择删除")}</button>{!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}{s3RawBytes && <span className="hint">{t("S3 scoped APIs")}</span>}</div>]; })} />
+          <DataTable caption="Filer directory entries" columns={["Name", "Directory", "Protected", "Size", "Modified", "Actions"]} rows={entries.map((item) => {
+            const name = String(item.name || item.Name || "");
+            const child = selectEntry(item);
+            const directory = Boolean(item.is_directory ?? item.IsDirectory);
+            const protectedPath = Boolean(item.protected) || protectedFilePath(child);
+            const s3Target = filerObjectTarget(managementId, item.s3_object);
+            const s3RawBytes = child.startsWith("/buckets/") && !directory;
+            return [textCell(name), yesNoUnknown(directory), protectedPath ? <StatusBadge state="permission_denied" label="保护" /> : t("No"), formatBytesOrUnknown(item.size ?? item.FileSize), displayValue(item.mtime ?? item.Mtime),
+              <div className="inlineActions">
+                <button type="button" disabled={protectedPath} title={protectedPath ? t("受保护 Filer 系统路径仅显示元数据") : ""} onClick={() => directory ? (setCursor(""), setPath(child)) : setRenameForm({ ...renameForm, source_path: child })}>{directory ? t("打开") : t("Prepare rename")}</button>
+                <button type="button" disabled={protectedPath} title={protectedPath ? t("受保护路径禁止写操作") : ""} onClick={() => selectDeleteTarget({ path: child, is_directory: directory })}>{t("选择删除")}</button>
+                {!directory && !protectedPath && !s3RawBytes && <a className="buttonLink" href={`/api/v1/management/${managementId}/files/download?path=${encodeURIComponent(child)}`}>{t("下载")}</a>}
+                {s3RawBytes && !protectedPath && (s3Target ? <a className="buttonLink" href={objectBrowseHref(s3Target)}>{t("Open object")}</a> : <><span className="hint">{t("Exact object identity is unavailable. Refresh the file listing before opening this object.")}</span><button type="button" onClick={() => setRefreshKey((value) => value + 1)}>{t("Refresh listing")}</button></>)}
+              </div>];
+          })} />
           {!entries.length && <StateRow label="Files" value={files.data ? t("空响应") : t("未知")} state={files.data ? "empty_response" : "unknown"} />}
           <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={nextCursor ? t("有下一页") : t("无下一页或未知")} />
         </DataPanel>
@@ -496,11 +512,28 @@ function DeletePreviewPanel({ preview }: { preview: { loading: boolean; error: s
   );
 }
 
-function ObjectsPage({ request, managementId, connection, scopes, scopeId, setScopeId, onObjectSelected }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void }) {
-  const associatedScopes = scopes.filter((scope) => connection?.s3_connection_id && scope.connection_id === connection.s3_connection_id);
-  const selectedScope = associatedScopes.find((scope) => scope.id === scopeId);
-  const selectedAnyScope = scopes.find((scope) => scope.id === scopeId);
-  const [prefix, setPrefix] = useState(selectedScope?.prefix || "");
+function ObjectsPage({ request, managementId, connection, scopes, scopeId: currentScopeId, setScopeId, onObjectSelected, projects, browseTarget, onBrowseScope }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void; projects: { id: string }[]; browseTarget?: ObjectBrowseTarget; onBrowseScope?: (scope: StorageScopeOption) => void }) {
+  const [accessRefresh, setAccessRefresh] = useState(0);
+  const projectIds = JSON.stringify(projects.map((project) => project.id));
+  const access = useApi<StorageScopeOption[]>(async () => {
+    if (!browseTarget || !connection?.s3_connection_id) return [];
+    const lists = await Promise.all(projects.map(async (project) => {
+      const result = await request<{ items: StorageScopeOption[] }>(`/projects/${encodeURIComponent(project.id)}/scopes`);
+      return (result.items || []).map((scope) => ({ ...scope, project_id: project.id }));
+    }));
+    return lists.flat();
+  }, [managementId, connection?.s3_connection_id, projectIds, Boolean(browseTarget), accessRefresh]);
+  const availableScopes = browseTarget ? access.data || [] : scopes;
+  const associatedScopes = availableScopes.filter((scope) => connection?.s3_connection_id && scope.connection_id === connection.s3_connection_id && (!browseTarget || scope.bucket === browseTarget.bucket && (browseTarget.key === undefined || browseTarget.key.startsWith(scope.prefix || ""))));
+  const selectedScope = associatedScopes.find((scope) => scope.id === currentScopeId) || (browseTarget ? associatedScopes[0] : undefined);
+  const scopeId = selectedScope?.id || "";
+  const selectedAnyScope = availableScopes.find((scope) => scope.id === currentScopeId);
+  const prefixContext = JSON.stringify([scopeId, selectedScope?.prefix, browseTarget]);
+  const requestedDirectory = browseTarget?.key?.slice(0, browseTarget.key.lastIndexOf("/") + 1);
+  const initialPrefix = requestedDirectory?.startsWith(selectedScope?.prefix || "") ? requestedDirectory : selectedScope?.prefix || "";
+  const [prefixState, setPrefixState] = useState({ context: prefixContext, value: initialPrefix });
+  const prefix = prefixState.context === prefixContext ? prefixState.value : initialPrefix;
+  const setPrefix = (value: string) => setPrefixState({ context: prefixContext, value });
   const [delimiter, setDelimiter] = useState("/");
   const [limit, setLimit] = useState("100");
   const [cursor, setCursor] = useState("");
@@ -511,12 +544,13 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   const selectedObject = selection?.context === selectionContext ? selection.object : null;
 
   useEffect(() => {
-    if ((!scopeId || !associatedScopes.some((scope) => scope.id === scopeId)) && associatedScopes[0] && setScopeId) setScopeId(associatedScopes[0].id);
-  }, [associatedScopes, scopeId, setScopeId]);
+    if (browseTarget) {
+      if (selectedScope && selectedScope.id !== currentScopeId) onBrowseScope?.(selectedScope);
+    } else if (!selectedScope && associatedScopes[0]) setScopeId?.(associatedScopes[0].id);
+  }, [selectedScope?.id, currentScopeId, access.data]);
 
   useEffect(() => {
     setCursor("");
-    setPrefix(selectedScope?.prefix || "");
   }, [selectedScope?.id]);
 
   useLayoutEffect(() => {
@@ -533,9 +567,10 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   const items = array(objects.data?.items).map(record);
   const folders = array(objects.data?.folders).map((item) => String(item));
   const nextCursor = typeof objects.data?.next_cursor === "string" ? objects.data.next_cursor : "";
-  const mismatch = Boolean(scopeId && selectedAnyScope && !selectedScope);
+  const mismatch = Boolean(currentScopeId && selectedAnyScope && !selectedScope && !browseTarget);
 
   async function selectKey(key: string) {
+    if (!selectedScope || !key.startsWith(selectedScope.prefix || "")) return;
     const generation = ++selectionGeneration.current;
     onObjectSelected?.(null);
     setSelection(null);
@@ -552,6 +587,10 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
     }
   }
 
+  useEffect(() => {
+    if (browseTarget?.key !== undefined && selectedScope) void selectKey(browseTarget.key);
+  }, [browseTarget?.key, selectedScope?.id, selectedScope?.authz_epoch]);
+
   function downloadHref(item: Record<string, unknown>) {
     const params = new URLSearchParams({ scope_id: scopeId, key: String(item.key || "") });
     if (typeof item.version_id === "string" && item.version_id) params.set("version_id", item.version_id);
@@ -561,12 +600,18 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
   return (
     <section className="managementPage">
       <div className="managementHero"><div><p>{t("Live S3 Object Browser")}</p><h2>{t("实时对象浏览")}</h2><span>{t("在已授权存储范围内浏览对象。")}</span></div><StatusBadge state={mismatch ? "permission_denied" : selectedScope ? "reported" : "not_configured"} label={mismatch ? "权限不足" : selectedScope ? "已绑定" : "未配置"} /></div>
+      {browseTarget && <div className="panel inlinePanel browseTarget">
+        <h2>{t("Requested bucket")}</h2><code>{browseTarget.bucket}</code>
+        {browseTarget.key !== undefined && <p><code>{browseTarget.key}</code></p>}
+        {!connection?.s3_connection_id ? <p className="notice">{t("This management connection has no linked S3 connection.")}</p> : access.loading ? <p role="status">{t("Resolving authorized scopes…")}</p> : access.error ? <p className="notice error">{translateMessage(access.error)}</p> : !selectedScope ? <p className="notice">{t("No authorized scope for bucket {bucket}.", { bucket: browseTarget.bucket })}{" "}{t("Choose or create a scope on the linked S3 connection that covers the requested key.")}</p> : null}
+        <div className="toolbar"><a className="buttonLink" href={objectBrowseHref(browseTarget, true)}>{t("Configure scoped access")}</a><button type="button" onClick={() => setAccessRefresh((value) => value + 1)}>{t("Refresh access")}</button></div>
+      </div>}
       <div className="managementGrid twoColumn">
         <DataPanel title={t("授权范围")} loading={false} error="">
           <p className="hint">{t("Choose a storage scope to see its bucket and authorized prefix. Browsing stays within this boundary.")}</p>
-          <label className="field">{t("切换 Scope")}<select value={scopeId} onChange={(event) => setScopeId?.(event.target.value)}><option value="">{t("未选择")}</option>{associatedScopes.map((scope) => <option key={scope.id} value={scope.id}>{scope.display_name || `${scope.bucket}/${scope.prefix || ""}`}</option>)}</select></label>
+          <label className="field">{t("切换 Scope")}<select value={scopeId} onChange={(event) => { const next = associatedScopes.find((scope) => scope.id === event.target.value); if (browseTarget && next) onBrowseScope?.(next); else setScopeId?.(event.target.value); }}><option value="">{t("未选择")}</option>{associatedScopes.map((scope) => <option key={scope.id} value={scope.id}>{scope.display_name || `${scope.bucket}/${scope.prefix || ""}`}</option>)}</select></label>
           <dl className="contextFacts">
-            <dt>{t("Bucket")}</dt><dd>{displayValue(selectedScope?.bucket)}</dd>
+            <dt>{t("Bucket")}</dt><dd>{displayValue(browseTarget?.bucket || selectedScope?.bucket)}</dd>
             <dt>{t("Root prefix")}</dt><dd>{selectedScope ? selectedScope.prefix || t("bucket root") : t("未知")}</dd>
             <dt>{t("当前前缀")}</dt><dd>{selectedScope ? prefix || selectedScope.prefix || t("bucket root") : t("未知")}</dd>
           </dl>
@@ -574,13 +619,20 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId, setSc
         </DataPanel>
         <div className="panel inlinePanel"><h2>{t("浏览条件")}</h2><label className="field">{t("对象前缀")}<input value={prefix} onChange={(event) => { setCursor(""); setPrefix(event.target.value); }} placeholder={selectedScope?.prefix || "scope prefix"} /></label><div className="miniGrid"><label className="field">{t("分隔符")}<select value={delimiter} onChange={(event) => { setCursor(""); setDelimiter(event.target.value); }}><option value="/">/</option><option value="">{t("不分组")}</option></select></label><label className="field">{t("每页数量")}<input value={limit} onChange={(event) => { setCursor(""); setLimit(event.target.value); }} /></label></div><p className="hint">{t("只能浏览所选 Scope 授权范围内的对象。")}</p></div>
       </div>
-      <DataPanel title={t("Folders / objects")} loading={objects.loading} error={objects.error}>
+      {selectedScope && <DataPanel title={t("Folders / objects")} loading={objects.loading} error={objects.error}>
         {folders.length ? <DataTable caption="Live S3 prefixes" columns={["Folder", "Action"]} rows={folders.map((folder) => [<code>{folder}</code>, <button type="button" onClick={() => { setCursor(""); setPrefix(folder); }}>{t("打开")}</button>])} /> : null}
-        <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => { void selectKey(String(item.key || "")); }}>{t("查看详情")}</button><a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a></div>])} />
+        <DataTable caption="Live S3 objects" columns={["Key", "Size", "ETag", "Version", "Actions"]} rows={items.map((item) => [<code>{displayValue(item.key)}</code>, formatBytesOrUnknown(item.size), displayValue(item.etag), displayValue(item.version_id), <div className="inlineActions"><button type="button" onClick={() => { void selectKey(String(item.key || "")); }}>{t("查看详情")}</button>{selectedScope.allow_original_download ? <a className="buttonLink" href={downloadHref(item)}>{t("下载")}</a> : <span className="hint">{t("Original download is disabled for this scope.")}</span>}</div>])} />
         {!items.length && <StateRow label="Objects" value={objects.data ? t("空响应") : t("未知")} state={objects.data ? "empty_response" : "unknown"} />}
         <PaginationBar firstDisabled={!cursor} nextDisabled={!nextCursor} onFirst={() => setCursor("")} onNext={() => setCursor(nextCursor)} status={t("Total: {count}", { count: objects.data?.total == null ? t("未知") : String(objects.data.total) })} />
-      </DataPanel>
-      {selectedObject && <div className="panel inlinePanel"><h2>{t("对象详情")}</h2><div className="stateList"><StateRow label="Object ID" value={displayValue(selectedObject.id)} state={selectedObject.id ? "reported" : "unknown"} /><StateRow label="Key" value={displayValue(selectedObject.key)} state={selectedObject.key ? "reported" : "unknown"} /><StateRow label="Version" value={displayValue(selectedObject.version_id)} state={selectedObject.version_id ? "reported" : "unknown"} /></div><ObjectVersionDeletePanel request={request} managementId={managementId} connection={connection} scopeId={scopeId} scope={selectedScope} object={selectedObject} /><div className="toolbar"><button type="button" onClick={() => { location.hash = "operations"; }}>{t("对象操作")}</button><button type="button" onClick={() => { location.hash = "assets"; }}>{t("资产检索")}</button></div></div>}
+      </DataPanel>}
+      {selectedObject && <div className="panel inlinePanel">
+        <h2>{t("对象详情")}</h2>
+        <div className="stateList"><StateRow label="Object ID" value={displayValue(selectedObject.id)} state={selectedObject.id ? "reported" : "unknown"} /><StateRow label="Key" value={displayValue(selectedObject.key)} state={selectedObject.key ? "reported" : "unknown"} /><StateRow label="Version" value={displayValue(selectedObject.version_id)} state={selectedObject.version_id ? "reported" : "unknown"} /></div>
+        {selectedScope?.allow_original_download ? <a className="buttonLink" href={downloadHref(selectedObject)}>{t("下载")}</a> : <p className="hint">{t("Original download is disabled for this scope.")}{" "}{t("Ask an administrator to grant original-download access for this bucket and key.")}</p>}
+        {selectedScope?.allow_preview && selectedObject.preview_state === "ready" && <img className="previewLarge" src={`/api/v1/scopes/${encodeURIComponent(scopeId)}/objects/${encodeURIComponent(String(selectedObject.id))}/preview`} alt={String(selectedObject.key || "")} />}
+        <ObjectVersionDeletePanel request={request} managementId={managementId} connection={connection} scopeId={scopeId} scope={selectedScope} object={selectedObject} />
+        <div className="toolbar"><button type="button" onClick={() => { location.hash = "operations"; }}>{t("对象操作")}</button><button type="button" onClick={() => { location.hash = "assets"; }}>{t("资产检索")}</button></div>
+      </div>}
       <ResultPane error={notice.error} result={notice.result} />
       <EvidenceDetails title={t("对象 DTO / cursor")} data={{ list: objects.data, selected: selectedObject, api: "/api/v1/management/{id}/objects" }} />
     </section>

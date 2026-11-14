@@ -63,14 +63,16 @@ The administrator password is stored as a hash on first startup. Changing the en
 
 1. Open **Settings** and create a Management Connection using your registered Admin credential reference.
 2. Configure the approved Admin and native service endpoints. Associate an S3 connection where S3 functionality is needed.
-3. For the image workbench, create a project and a Scope bound to a bucket and literal key prefix. Enable preview, original download, or writes only as needed.
-4. Submit a scan to index objects. Submit a separate checksum scan to find exact duplicate candidates.
+3. For scoped object browsing or the image workbench, create a project and a Scope bound to a bucket and literal key prefix. Enable preview, original download, or writes only as needed.
+4. For indexed image workflows, submit a scan to index objects. Submit a separate checksum scan to find exact duplicate candidates. Live Objects can browse an authorized Scope immediately.
 
 Management writes are disabled by default. Enable only the actions and target ranges you need. Missing dependencies and unsupported capabilities are reported explicitly.
 
 The image workbench uses the same visual layout as the management pages. Assets keeps filters and selection actions above the gallery, with jobs and duplicate/capacity evidence beside it. Jobs, Diagnostics, Operations, and Presets clear Scope-bound inputs and results when you change context.
 
-Management pages separate browsing, current status, and editable settings. Select a bucket from its inventory to configure it; new-bucket creation and existing-bucket owner/quota controls use separate sections. Filer tools sit below the full-width file list. Live Objects shows the bucket, authorized root prefix, and current browsing prefix together, with raw evidence available in collapsed details.
+Use **Browse files** on a bucket row to open its contents, or **Configuration** to edit its settings. Live Objects resolves a matching Scope across your available projects and keeps the requested management connection and bucket. If scoped access needs configuration, the page shows the requested target and opens Settings with its connection and bucket filled in. After adding a Scope, return to that target to browse immediately.
+
+Filer files under `/buckets/<bucket>/` provide **Open object**, which carries the exact object key into scoped browsing. Downloads require original-download permission. Browsing works with management writes disabled. Live Objects shows the bucket, authorized root prefix, and current browsing prefix together, with raw evidence available in collapsed details.
 
 ### Stop or restart
 
