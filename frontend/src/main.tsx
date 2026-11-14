@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import React, { FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { t, translateMessage, useLocale } from "./i18n";
@@ -423,7 +423,7 @@ function App() {
         {route === "diagnostics" && <Diagnostics request={request} scopeId={scopeId} />}
         {route === "operations" && <Operations request={request} scopeId={scopeId} scope={scope} sourceObjectIds={selectedObjectIds} initialTab={operationTab} />}
         {route === "presets" && <Presets request={request} projectId={projectId} scopeId={scopeId} initialObjectIds={deriveObjectIds} />}
-        {route === "settings" && (browseTarget && managementLoading ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <Settings key={routeHash} request={request} projects={projects} connections={connections} managementConnections={managementConnections} refresh={refresh} refreshManagementConnections={refreshManagementConnections} projectId={projectId} setProjectId={selectProject} />)}
+        {route === "settings" && (browseTarget && managementLoading && managementConnections.length === 0 ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <Settings key={routeHash} request={request} projects={projects} connections={connections} managementConnections={managementConnections} refresh={refresh} refreshManagementConnections={refreshManagementConnections} projectId={projectId} setProjectId={selectProject} />)}
       </main>
     </div>
   );
@@ -1443,15 +1443,22 @@ function Settings({ request, projects, connections, managementConnections, refre
   const [scope, setScope] = useState({ connection_id: setupConnection?.s3_connection_id || "", display_name: setupTarget?.bucket || "Images scope", bucket: setupTarget?.bucket || "archive", prefix: setupTarget?.key?.slice(0, setupTarget.key.lastIndexOf("/") + 1) || "", allow_preview: true, allow_original_download: true, writable: false, manage_bucket: false });
   const [tab, setTab] = useState<"management" | "images">(setupConnection?.s3_connection_id ? "images" : "management");
   const [error, setError] = useState("");
+  const saveGeneration = useRef(0);
 
-  async function save(fn: () => Promise<void>, returnToBrowse = false) {
+  useLayoutEffect(() => () => { saveGeneration.current += 1; }, []);
+
+  async function save(fn: (isCurrent: () => boolean) => Promise<void>, returnToBrowse = false) {
+    const generation = ++saveGeneration.current;
+    const originHash = location.hash;
+    const isCurrent = () => generation === saveGeneration.current && location.hash === originHash;
     setError("");
     try {
-      await fn();
+      await fn(isCurrent);
+      if (!isCurrent()) return;
       await refresh();
-      if (returnToBrowse && setupTarget) location.hash = objectBrowseHref(setupTarget);
+      if (isCurrent() && returnToBrowse && setupTarget) location.hash = objectBrowseHref(setupTarget);
     } catch (err) {
-      setError(String((err as Error).message));
+      if (isCurrent()) setError(String((err as Error).message));
     }
   }
 
@@ -1479,7 +1486,7 @@ function Settings({ request, projects, connections, managementConnections, refre
           <h2>{t("项目")}</h2>
           <label className="field">{t("Key")}<input value={project.project_key} onChange={(event) => setProject({ ...project, project_key: event.target.value })} /></label>
           <label className="field">{t("名称")}<input value={project.display_name} onChange={(event) => setProject({ ...project, display_name: event.target.value })} /></label>
-          <button onClick={() => save(async () => { const created = await request<Project>("/projects", { method: "POST", body: JSON.stringify(project) }); setProjectId(created.id); })}>{t("添加项目")}</button>
+          <button onClick={() => save(async (isCurrent) => { const created = await request<Project>("/projects", { method: "POST", body: JSON.stringify(project) }); if (isCurrent()) setProjectId(created.id); })}>{t("添加项目")}</button>
           <DataTable columns={[t("Key"), t("名称")]} rows={projects.map((item) => [item.project_key || item.id, item.display_name])} />
         </div>
         <div>

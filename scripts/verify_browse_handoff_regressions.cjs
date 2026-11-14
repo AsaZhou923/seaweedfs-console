@@ -53,6 +53,8 @@ async function startMock(options = {}) {
     requests: [], gates: options.hold ? [gate(options.hold)] : [], failScopes: Boolean(options.failScopes), failObjects: Boolean(options.failObjects), empty: Boolean(options.empty),
     authenticated: options.authenticated !== false,
     objectIdentity: options.objectIdentity !== false,
+    failCreate: Boolean(options.failCreate),
+    failRefreshConnections: false,
   };
   const server = http.createServer(async (req, res) => {
     try {
@@ -81,15 +83,21 @@ async function startMock(options = {}) {
         response = state.authenticated ? { user: { username: "synthetic" }, csrf_token: "synthetic-csrf", projects } : { error: { code: "UNAUTHENTICATED", message: "Login required" } };
         status = state.authenticated ? 200 : 401;
       } else if (request.path === "/connections") {
-        response = { items: ["a", "b"].map((id) => ({ id: `s3-${id}`, display_name: `S3 ${id}`, endpoint_url: `http://s3-${id}.invalid` })) };
+        response = state.failRefreshConnections ? { error: { code: "SYNTHETIC_REFRESH_FAILURE", message: "Settings refresh failed" } } : { items: ["a", "b"].map((id) => ({ id: `s3-${id}`, display_name: `S3 ${id}`, endpoint_url: `http://s3-${id}.invalid` })) };
+        status = state.failRefreshConnections ? 503 : 200;
       } else if (request.path === "/management/connections") {
         response = { items: managers };
       } else if (/^\/projects\/[^/]+\/scopes$/.test(request.path)) {
         const projectId = request.path.split("/")[2];
         if (req.method === "POST") {
-          const created = { ...scopeB, ...payload, ...payload.scope_policy, id: "scope-created", project_id: projectId };
-          state.scopes[projectId].push(created);
-          response = created;
+          if (state.failCreate) {
+            response = { error: { code: "SYNTHETIC_CREATE_FAILURE", message: "Scope creation failed" } };
+            status = 503;
+          } else {
+            const created = { ...scopeB, ...payload, ...payload.scope_policy, id: "scope-created", project_id: projectId };
+            state.scopes[projectId].push(created);
+            response = created;
+          }
         } else {
           response = state.failScopes ? { error: { code: "SYNTHETIC_SCOPE_FAILURE", message: "Scope lookup failed" } } : { items: [...state.scopes[projectId]] };
           status = state.failScopes ? 503 : 200;
@@ -137,7 +145,7 @@ async function run() {
       await page.goto(`${fixture.base}/#${route}`);
       await test(page, fixture);
       assert.deepEqual(errors, [], "browser must render without JavaScript errors");
-      const scopeSetup = name === "scope_setup_prefills_target_and_returns_to_bucket" || name === "setup_deep_link_waits_for_requested_management_binding";
+      const scopeSetup = options.allowScopeCreation || name === "scope_setup_prefills_target_and_returns_to_bucket" || name === "setup_deep_link_waits_for_requested_management_binding";
       const mutations = fixture.state.requests.filter((request) => request.method !== "GET" && request.path !== "/auth/login" && !request.path.endsWith("/objects/select") && !(scopeSetup && /^\/projects\/[^/]+\/scopes$/.test(request.path)));
       assert.deepEqual(mutations, [], "browsing must dispatch no management/storage mutations");
       results.push({ name, passed: true });
@@ -273,6 +281,80 @@ async function run() {
       assert.equal(creation.payload.bucket, "bucket-b");
       assert.ok(state.requests.filter((request) => request.path.endsWith("/objects/select")).every((request) => request.payload.key === trickyKey));
     });
+
+    const setupLocation = `settings?setup=scope&${objectLocation().split("?")[1]}`;
+    const creations = (state) => state.requests.filter((request) => request.method === "POST" && /^\/projects\/[^/]+\/scopes$/.test(request.path));
+    function assertOriginalCreation(state) {
+      assert.equal(creations(state).length, 1, "navigation must not retry scope creation");
+      assert.equal(creations(state)[0].path, "/projects/project-a/scopes");
+      assert.equal(creations(state)[0].payload.bucket, "bucket-b");
+      assert.equal(creations(state)[0].payload.connection_id, "s3-a");
+    }
+
+    for (const failCreate of [false, true]) {
+      await scenario(`late_scope_create_${failCreate ? "failure" : "success"}_cannot_redirect_new_bucket`, setupLocation, {
+        allowScopeCreation: true, failCreate, hold: (request) => request.method === "POST" && request.path.endsWith("/scopes"),
+      }, async (page, { state }) => {
+        await page.getByRole("button", { name: "Add scope", exact: true }).click();
+        const pending = state.gates[0];
+        await until(() => pending.entered, "held scope creation");
+        const destination = objectLocation("bucket-a");
+        await page.evaluate((hash) => { location.hash = hash; }, destination);
+        await inventory(page).getByText("a/photo.jpg", { exact: true }).waitFor();
+        const response = page.waitForResponse((value) => value.request().method() === "POST" && value.url().endsWith("/scopes"));
+        pending.release();
+        await (await response).finished();
+        await page.waitForLoadState("networkidle");
+        assert.equal(await page.evaluate(() => location.hash), `#${destination}`, "an old Settings completion cannot navigate away from the newer bucket");
+        await inventory(page).getByText("a/photo.jpg", { exact: true }).waitFor();
+        assert.equal(await page.getByText(/SYNTHETIC_CREATE_FAILURE/).count(), 0, "old Settings errors cannot appear under a new bucket");
+        assertOriginalCreation(state);
+      });
+
+      await scenario(`late_scope_create_${failCreate ? "failure" : "success"}_cannot_own_remounted_settings`, setupLocation, {
+        allowScopeCreation: true, failCreate, hold: (request) => request.method === "POST" && request.path.endsWith("/scopes"),
+      }, async (page, { state }) => {
+        await page.getByRole("button", { name: "Add scope", exact: true }).click();
+        const pending = state.gates[0];
+        await until(() => pending.entered, "held original Settings save");
+        await page.evaluate((hash) => { location.hash = hash; }, objectLocation("bucket-a"));
+        await inventory(page).getByText("a/photo.jpg", { exact: true }).waitFor();
+        await page.evaluate((hash) => { location.hash = hash; }, setupLocation);
+        await page.getByLabel("Bucket", { exact: true }).fill("new-unsaved-bucket");
+        const response = page.waitForResponse((value) => value.request().method() === "POST" && value.url().endsWith("/scopes"));
+        pending.release();
+        await (await response).finished();
+        await page.waitForLoadState("networkidle");
+        assert.equal(await page.evaluate(() => location.hash), `#${setupLocation}`, "returning to the same Settings URL must create fresh completion ownership");
+        assert.equal(await page.getByLabel("Bucket", { exact: true }).inputValue(), "new-unsaved-bucket", "old save/refresh cannot reset the new Settings form");
+        assert.equal(await page.getByText(/SYNTHETIC_CREATE_FAILURE/).count(), 0, "old errors cannot populate a remounted form");
+        assertOriginalCreation(state);
+      });
+    }
+
+    for (const failRefresh of [false, true]) {
+      await scenario(`late_settings_refresh_${failRefresh ? "failure" : "success"}_cannot_redirect_new_bucket`, setupLocation, {
+        allowScopeCreation: true,
+      }, async (page, { state }) => {
+        await page.getByRole("button", { name: "Add scope", exact: true }).waitFor();
+        const pending = gate((request) => request.path === "/connections");
+        state.gates.push(pending);
+        state.failRefreshConnections = failRefresh;
+        await page.getByRole("button", { name: "Add scope", exact: true }).click();
+        await until(() => pending.entered, "held post-save refresh");
+        const destination = objectLocation("bucket-a");
+        await page.evaluate((hash) => { location.hash = hash; }, destination);
+        await inventory(page).getByText("a/photo.jpg", { exact: true }).waitFor();
+        const response = page.waitForResponse((value) => new URL(value.url()).pathname === "/api/v1/connections");
+        pending.release();
+        await (await response).finished();
+        await page.waitForLoadState("networkidle");
+        assert.equal(await page.evaluate(() => location.hash), `#${destination}`, "an old post-save refresh cannot navigate away from the newer bucket");
+        await inventory(page).getByText("a/photo.jpg", { exact: true }).waitFor();
+        assert.equal(await page.getByText(/SYNTHETIC_REFRESH_FAILURE/).count(), 0, "old refresh errors cannot appear under a new bucket");
+        assertOriginalCreation(state);
+      });
+    }
 
     await scenario("unlinked_manager_has_connection_specific_setup", objectLocation("bucket-b", undefined, "manager-unlinked"), { withScope: true }, async (page, { state }) => {
       const setup = page.getByRole("link", { name: /Configure/ }).first();
