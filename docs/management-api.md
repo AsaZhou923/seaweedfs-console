@@ -247,3 +247,10 @@ Filer file entries carry an `s3_object` identity with literal `bucket` and `key`
 
 - Copy and derivation submission and worker execution require `object:download_original` on the source Scope, in addition to existing destination write checks. Revoking this grant while a job is queued prevents original-byte reads and destination writes. Preview-only access does not authorize exported derivations.
 - Version information and version deletion share the same protection check. HEAD legal-hold/retention evidence and exact-version protection APIs remain authoritative even when bucket Object Lock configuration is absent. Active protection and unknown or malformed protection results block deletion.
+
+## Request validation for project storage
+
+- Supply required names, object identifiers, keys, version IDs and snapshot IDs as JSON strings. Object keys retain their literal spelling, including spaces. For preview batches, checksum scans and snapshots, an explicit object selection uses an `object_ids` array of string IDs.
+- `POST /connections` requires a nonempty string `secret_ref`. A missing or malformed reference returns HTTP 422 `INVALID_REQUEST`. An unregistered reference returns HTTP 403 `SECRET_REF_NOT_FOUND`.
+- `POST /cache/evict` accepts a positive integer `max_bytes`. Omit the cache limit or pass `null` to use the configured default.
+- Passing a value of the wrong JSON type for any field listed above returns HTTP 422 with `error.code` set to `INVALID_REQUEST`.

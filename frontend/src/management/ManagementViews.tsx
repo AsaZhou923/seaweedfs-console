@@ -240,7 +240,8 @@ function StoragePage({ request, managementId, connection }: { request: Requester
 
 function BucketsPage({ request, managementId, connection }: { request: Requester; managementId: string; connection?: ManagementConnection }) {
   const [refreshKey, setRefreshKey] = useState(0);
-  const buckets = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/buckets`), [managementId, refreshKey]);
+  const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0);
+  const buckets = useApi<Record<string, unknown>>(() => request(`/management/${managementId}/buckets`), [managementId, inventoryRefreshKey]);
   const [selected, setSelected] = useState("");
   const [createForm, setCreateForm] = useState({ name: "", region: "us-east-1", advanced: false, owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false, versioning_enabled: false, object_lock_enabled: false, set_default_retention: false, object_lock_mode: "GOVERNANCE", object_lock_duration: "1" });
   const [bucketForm, setBucketForm] = useState({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false });
@@ -254,14 +255,28 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   const lifecycle = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const policy = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const createInvalid = createForm.advanced && createForm.set_default_retention && (!Number.isInteger(Number(createForm.object_lock_duration)) || Number(createForm.object_lock_duration) < 1);
-  useEffect(() => {
+  const writeGeneration = useRef(0);
+  const currentTarget = useRef<{ managementId: string; selected: string } | null>(null);
+  useLayoutEffect(() => {
+    writeGeneration.current += 1;
+    currentTarget.current = { managementId, selected };
     setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false });
     setSetting({ versioning: "Suspended", object_lock_configuration: "{\n  \"ObjectLockEnabled\": \"Enabled\"\n}", lifecycle: "{\n  \"rules\": []\n}", policy: "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": []\n}" });
     setNotice({ error: "", result: null });
+    return () => {
+      writeGeneration.current += 1;
+      currentTarget.current = null;
+    };
   }, [managementId, selected]);
   async function bucketWrite(fn: () => Promise<unknown>) {
-    const result = await run(setNotice, fn);
-    if (result) setRefreshKey((value) => value + 1);
+    const generation = writeGeneration.current;
+    const result = await run((notice) => {
+      if (generation === writeGeneration.current) setNotice(notice);
+    }, fn);
+    if (result && currentTarget.current?.managementId === managementId) {
+      setInventoryRefreshKey((value) => value + 1);
+      if (currentTarget.current.selected === selected) setRefreshKey((value) => value + 1);
+    }
   }
   return (
     <section className="managementPage">
@@ -370,15 +385,23 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
   const deletePreviewGeneration = useRef(0);
+  const writeGeneration = useRef(0);
+  const currentTarget = useRef<{ managementId: string; path: string } | null>(null);
   useLayoutEffect(() => {
     deletePreviewGeneration.current += 1;
+    writeGeneration.current += 1;
+    currentTarget.current = { managementId, path };
     setDeleteForm({ path: "" });
     setDeletePreview({ loading: false, error: "", data: null });
     setRenameForm({ source_path: "", target_path: "" });
     setUploadFile(null);
     setFolderName("");
     setNotice({ error: "", result: null });
-    return () => { deletePreviewGeneration.current += 1; };
+    return () => {
+      deletePreviewGeneration.current += 1;
+      writeGeneration.current += 1;
+      currentTarget.current = null;
+    };
   }, [managementId, path]);
   function selectDeleteTarget(next: { path: string; is_directory?: boolean }) {
     deletePreviewGeneration.current += 1;
@@ -392,8 +415,11 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   const canFileWrite = can(connection, "file.manage");
   const nextCursor = typeof files.data?.next_cursor === "string" ? files.data.next_cursor : "";
   async function fileWrite(fn: () => Promise<unknown>) {
-    const result = await run(setNotice, fn);
-    if (result) setRefreshKey((value) => value + 1);
+    const generation = writeGeneration.current;
+    const result = await run((notice) => {
+      if (generation === writeGeneration.current) setNotice(notice);
+    }, fn);
+    if (result && currentTarget.current?.managementId === managementId && currentTarget.current.path === path) setRefreshKey((value) => value + 1);
   }
   function selectEntry(item: Record<string, unknown>) {
     const full = String(item.full_path || item.FullPath || item.path || "");

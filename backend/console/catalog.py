@@ -21,6 +21,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, Response
 
 from . import core, db, imaging, jobs, storage
+from .request_validation import string_list
 from .security import AppError, current_user, mutation, sign_json, unsign_json, utc_add
 
 router = APIRouter(prefix="/api/v1")
@@ -828,7 +829,7 @@ def checksum_scan(request: Request, scope_id: str, body: dict):
     user = mutation(request)
     scope = core.require_scope(request, scope_id)
     with db.connect(request.app.state.settings) as conn:
-        identifiers = body.get("object_ids")
+        identifiers = string_list(body, "object_ids") if body.get("object_ids") is not None else None
         if identifiers is None:
             identifiers = [row["id"] for row in conn.execute("SELECT id FROM objects WHERE scope_id=? AND is_current=1 AND presence='present' ORDER BY first_seen_at,id LIMIT 10001", (scope_id,))]
         if len(identifiers) > 10000 or not identifiers:
@@ -851,7 +852,7 @@ def previews(request: Request, scope_id: str, body: dict):
     scope = core.require_scope(request, scope_id)
     if not scope["allow_preview"]:
         raise AppError("FORBIDDEN_SCOPE", "此范围未授权预览", 403)
-    identifiers = body.get("object_ids", [])
+    identifiers = string_list(body, "object_ids")
     if not 1 <= len(identifiers) <= 60:
         raise AppError("RESOURCE_LIMIT_EXCEEDED", "每批1–60个预览", 429)
     with db.connect(request.app.state.settings) as conn:
@@ -894,7 +895,7 @@ def snapshot(request: Request, scope_id: str, body: dict):
     scope = core.require_scope(request, scope_id)
     identifier = str(uuid.uuid4())
     with db.connect(request.app.state.settings) as conn:
-        chosen = body.get("object_ids")
+        chosen = string_list(body, "object_ids") if body.get("object_ids") is not None else None
         if chosen is None:
             filters = body.get("filters", {})
             chosen, cursor = [], None

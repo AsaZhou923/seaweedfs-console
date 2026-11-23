@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from fastapi import APIRouter, Request
 
 from . import catalog, core, db, enhancements, jobs, storage
+from .request_validation import required_string
 from .security import AppError, current_user, mutation
 
 
@@ -569,10 +570,11 @@ def list_presets(request: Request, project_id: str):
 @router.post("/projects/{project_id}/presets")
 def create_preset(request: Request, project_id: str, body: dict[str, Any]):
     user = mutation(request)
+    name = required_string(body, "name")
     with db.connect(request.app.state.settings) as conn:
         enhancements.initialize(conn)
         try:
-            result = enhancements.create_preset(conn, project_id=project_id, name=body["name"], params=_normalize_preset_params(body.get("params", body)), actor_id=user.id)
+            result = enhancements.create_preset(conn, project_id=project_id, name=name, params=_normalize_preset_params(body.get("params", body)), actor_id=user.id)
             conn.commit()
             return result
         except Exception as exc:
@@ -591,9 +593,10 @@ def list_groups(request: Request, project_id: str):
 @router.post("/projects/{project_id}/groups")
 def create_group(request: Request, project_id: str, body: dict[str, Any]):
     mutation(request)
+    name = required_string(body, "name")
     with db.connect(request.app.state.settings) as conn:
         try:
-            result = enhancements.create_group(conn, project_id=project_id, name=body["name"], source=body.get("source", "manual"))
+            result = enhancements.create_group(conn, project_id=project_id, name=name, source=body.get("source", "manual"))
             conn.commit()
             return result
         except Exception as exc:
@@ -607,7 +610,7 @@ def add_group_member(request: Request, project_id: str, group_id: str, body: dic
         row = conn.execute("SELECT id FROM image_groups WHERE id=? AND project_id=?", (group_id, project_id)).fetchone()
         if not row:
             raise AppError("GROUP_NOT_FOUND", "分组不存在。", 404)
-        enhancements.add_group_member(conn, group_id=group_id, object_id=body["object_id"], relation_source=body.get("source", "manual"))
+        enhancements.add_group_member(conn, group_id=group_id, object_id=required_string(body, "object_id"), relation_source=body.get("source", "manual"))
         conn.commit()
         return {"ok": True}
 
@@ -616,7 +619,8 @@ def add_group_member(request: Request, project_id: str, group_id: str, body: dic
 def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]):
     user = mutation(request)
     scope = _require_scope(request, scope_id)
-    object_id = body["object_id"]
+    object_id = required_string(body, "object_id")
+    preset_id = required_string(body, "preset_id")
     output_scope_id = body.get("output_scope_id") or scope_id
     with db.connect(request.app.state.settings) as conn:
         scope = core.ensure_scope_permission(conn, scope_id, "object:download_original")
@@ -625,7 +629,7 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
         enhancements.initialize(conn)
         if output_scope["project_id"] != scope["project_id"]:
             raise AppError("FORBIDDEN_SCOPE", "派生输出 scope 必须属于同一项目。", 403)
-        preset_row = conn.execute("SELECT project_id,params_json FROM enhancement_presets WHERE id=?", (body["preset_id"],)).fetchone()
+        preset_row = conn.execute("SELECT project_id,params_json FROM enhancement_presets WHERE id=?", (preset_id,)).fetchone()
         if not preset_row or preset_row["project_id"] != scope["project_id"]:
             raise AppError("PRESET_NOT_FOUND", "preset 不存在或不属于当前项目。", 404)
         output_key = body.get("output_key")
@@ -634,7 +638,7 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
                 "scope_id": scope_id,
                 "source_object_id": object_id,
                 "source_revision": source["revision"],
-                "preset_id": body["preset_id"],
+                "preset_id": preset_id,
                 "output_scope_id": output_scope_id,
             })
             output_format = json.loads(preset_row["params_json"])["format"]
@@ -647,7 +651,7 @@ def submit_derived_variant(request: Request, scope_id: str, body: dict[str, Any]
                 scope_id=scope_id,
                 source_object_id=object_id,
                 source_revision=source["revision"],
-                preset_id=body["preset_id"],
+                preset_id=preset_id,
                 output_scope_id=output_scope_id,
                 output_bucket=output_scope["bucket"],
                 output_key=output_key,
@@ -1029,7 +1033,7 @@ def _check_derived_variant_health(conn, settings: Any, scope: Mapping[str, Any],
 def multipart_init(request: Request, scope_id: str, body: dict[str, Any]):
     mutation(request)
     scope = _require_scope(request, scope_id, write=True)
-    key = body["key"]
+    key = required_string(body, "key")
     core.assert_key_in_scope(scope, key)
     with db.connect(request.app.state.settings) as conn:
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
@@ -1104,10 +1108,11 @@ def multipart_abort(request: Request, scope_id: str, upload_id: str):
 def copy_object(request: Request, scope_id: str, body: dict[str, Any]):
     mutation(request)
     scope = _require_scope(request, scope_id, write=True)
-    target_key = body["target_key"]
+    target_key = required_string(body, "target_key")
+    object_id = required_string(body, "object_id")
     core.assert_key_in_scope(scope, target_key)
     with db.connect(request.app.state.settings) as conn:
-        source = core.get_object(conn, scope_id, body["object_id"])
+        source = core.get_object(conn, scope_id, object_id)
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         try:
             result = enhancements.copy_object_safely(
@@ -1155,7 +1160,7 @@ def put_metadata(request: Request, scope_id: str, object_id: str, body: dict[str
     mutation(request)
     scope = _require_scope(request, scope_id, write=True)
     obj = core.require_object(request, scope_id, object_id)
-    target_key = body["target_key"]
+    target_key = required_string(body, "target_key")
     core.assert_key_in_scope(scope, target_key)
     with db.connect(request.app.state.settings) as conn:
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
@@ -1204,12 +1209,13 @@ def restore_version(request: Request, scope_id: str, object_id: str, body: dict[
     mutation(request)
     scope = _require_scope(request, scope_id, write=True)
     obj = core.require_object(request, scope_id, object_id)
-    target_key = body["target_key"]
+    target_key = required_string(body, "target_key")
+    version_id = required_string(body, "version_id")
     core.assert_key_in_scope(scope, target_key)
     with db.connect(request.app.state.settings) as conn:
         adapter = _adapter_for_scope(conn, request.app.state.settings, scope)
         try:
-            result = enhancements.restore_object_version(conn, adapter, scope_id=scope_id, bucket=scope["bucket"], key=obj["key"], version_id=body["version_id"], target_key=target_key)
+            result = enhancements.restore_object_version(conn, adapter, scope_id=scope_id, bucket=scope["bucket"], key=obj["key"], version_id=version_id, target_key=target_key)
             conn.commit()
             return result
         except Exception as exc:
@@ -1418,6 +1424,7 @@ def rollback_bucket_config(request: Request, scope_id: str, kind: str, body: dic
     mutation(request)
     scope = _require_scope(request, scope_id, manage_bucket=True)
     _require_bucket_admin_scope(scope)
+    snapshot_id = required_string(body, "snapshot_id")
     with db.connect(request.app.state.settings) as conn:
         try:
             result = enhancements.rollback_bucket_config(
@@ -1426,7 +1433,7 @@ def rollback_bucket_config(request: Request, scope_id: str, kind: str, body: dic
                 scope_id=scope_id,
                 bucket=scope["bucket"],
                 kind=kind,
-                snapshot_id=body["snapshot_id"],
+                snapshot_id=snapshot_id,
                 expected_current_hash=body.get("expected_current_hash"),
                 exclusive_writer_ack=body.get("exclusive_writer_ack") is True,
                 actor_id=getattr(request.state.user, "id", None),
@@ -1513,7 +1520,10 @@ def audits(request: Request, scope_id: str):
 @router.post("/cache/evict")
 def cache_evict(request: Request, body: dict[str, Any]):
     mutation(request)
-    return catalog.evict_cache(request.app.state.settings, max_bytes=body.get("max_bytes"))
+    max_bytes = body.get("max_bytes")
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+        raise AppError("INVALID_REQUEST", "max_bytes must be a positive integer", 422, field="max_bytes")
+    return catalog.evict_cache(request.app.state.settings, max_bytes=max_bytes)
 
 
 @router.post("/scopes/{scope_id}/capacity-snapshots")

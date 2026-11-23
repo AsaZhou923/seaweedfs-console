@@ -68,6 +68,8 @@ The administrator password is stored as a hash on first startup. Changing the en
 
 Management writes are disabled by default. Enable only the actions and target ranges you need. Missing dependencies and unsupported capabilities are reported explicitly.
 
+Bucket and Filer write results belong to the target where you submitted the change. If you switch buckets or directories before a write finishes, check operation history for its outcome before retrying.
+
 The image workbench uses the same visual layout as the management pages. Assets keeps filters and selection actions above the gallery, with jobs and duplicate/capacity evidence beside it. Jobs, Diagnostics, Operations, and Presets clear Scope-bound inputs and results when you change context.
 
 Use **Browse files** on a bucket row to open its contents, or **Configuration** to edit its settings. Live Objects resolves a matching Scope across your available projects and keeps the requested management connection and bucket. If scoped access needs configuration, the page shows the requested target and opens Settings with its connection and bucket filled in. After adding a Scope, return to that target to browse immediately.

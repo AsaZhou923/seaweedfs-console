@@ -193,6 +193,136 @@ def scan_scope(client: TestClient, app, csrf: str, scope_id: str) -> list[dict]:
     return assets.json()["items"]
 
 
+def test_required_enhancement_fields_reject_malformed_values_before_side_effects(api, monkeypatch):
+    from console import enhancement_api
+
+    client, app, _fake = api
+    csrf = login(client)
+    _connection_id, project_id, scope_id = create_scope(client, csrf, prefix="")
+    object_id = scan_scope(client, app, csrf, scope_id)[0]["id"]
+    with db.connect(app.state.settings) as conn:
+        conn.execute("UPDATE scopes SET writable=1,manage_bucket=1 WHERE id=?", (scope_id,))
+    group = client.post(f"/api/v1/projects/{project_id}/groups", json={"name": "Test group"}, headers=authed_headers(csrf))
+    assert group.status_code == 200, group.text
+
+    def unexpected_adapter(*_args, **_kwargs):
+        pytest.fail("malformed request reached storage adapter")
+
+    monkeypatch.setattr(enhancement_api, "_adapter_for_scope", unexpected_adapter)
+    root = f"/api/v1/scopes/{scope_id}"
+    cases = [
+        ("POST", f"/api/v1/projects/{project_id}/presets", {}, "name"),
+        ("POST", f"/api/v1/projects/{project_id}/groups", {}, "name"),
+        ("POST", f"/api/v1/projects/{project_id}/groups/{group.json()['id']}/members", {}, "object_id"),
+        ("POST", f"{root}/derived-variants", {"preset_id": "preset"}, "object_id"),
+        ("POST", f"{root}/derived-variants", {"object_id": object_id}, "preset_id"),
+        ("POST", f"{root}/uploads/multipart", {}, "key"),
+        ("POST", f"{root}/objects/copy", {"object_id": object_id}, "target_key"),
+        ("POST", f"{root}/objects/copy", {"target_key": "new.jpg"}, "object_id"),
+        ("PUT", f"{root}/objects/{object_id}/metadata", {}, "target_key"),
+        ("POST", f"{root}/objects/{object_id}/restore", {"version_id": "null"}, "target_key"),
+        ("POST", f"{root}/objects/{object_id}/restore", {"target_key": "new.jpg"}, "version_id"),
+        ("POST", f"{root}/bucket/cors/rollback", {}, "snapshot_id"),
+    ]
+    tables = ("enhancement_presets", "image_groups", "image_group_members", "jobs", "derived_variants", "multipart_uploads", "operation_intents")
+    with db.connect(app.state.settings) as conn:
+        before = {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in tables}
+    for method, url, base_body, field in cases:
+        for value in (None, "", 1, True, [], {}):
+            body = {**base_body, field: value}
+            response = client.request(method, url, json=body, headers=authed_headers(csrf))
+            assert response.status_code == 422, (url, body, response.text)
+            assert response.json()["error"]["code"] == "INVALID_REQUEST"
+            assert response.json()["error"]["field"] == field
+        response = client.request(method, url, json=base_body, headers=authed_headers(csrf))
+        assert response.status_code == 422, (url, response.text)
+        assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    with db.connect(app.state.settings) as conn:
+        after = {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in tables}
+    assert after == before
+
+
+def test_catalog_object_lists_require_string_lists_and_preserve_defaults(api):
+    client, app, _fake = api
+    csrf = login(client)
+    _connection_id, _project_id, scope_id = create_scope(client, csrf)
+    object_id = scan_scope(client, app, csrf, scope_id)[0]["id"]
+    root = f"/api/v1/scopes/{scope_id}"
+    with db.connect(app.state.settings) as conn:
+        job_count = conn.execute("SELECT count(*) FROM jobs").fetchone()[0]
+    for suffix in ("checksum-scans", "preview-batches", "previews/batch", "snapshots"):
+        for value in (object_id, 1, True, {}, [[object_id]], [object_id, None], [1]):
+            response = client.post(f"{root}/{suffix}", json={"object_ids": value}, headers=authed_headers(csrf))
+            assert response.status_code == 422, (suffix, value, response.text)
+            assert response.json()["error"]["code"] == "INVALID_REQUEST"
+        if suffix != "snapshots":
+            response = client.post(f"{root}/{suffix}", json={"object_ids": []}, headers=authed_headers(csrf))
+            assert response.status_code == 429, response.text
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == job_count
+        assert conn.execute("SELECT count(*) FROM operation_snapshots").fetchone()[0] == 0
+    for body in ({}, {"object_ids": None}, {"object_ids": [object_id, object_id]}):
+        response = client.post(f"{root}/snapshots", json=body, headers=authed_headers(csrf))
+        assert response.status_code == 200, response.text
+        assert response.json()["count"] >= 1
+    response = client.post(f"{root}/checksum-scans", json={"object_ids": None}, headers=authed_headers(csrf))
+    assert response.status_code == 200, response.text
+    response = client.post(f"{root}/preview-batches", json={"object_ids": [object_id]}, headers=authed_headers(csrf))
+    assert response.status_code == 200, response.text
+
+
+def test_cache_eviction_validates_positive_integer_and_preserves_default(api, monkeypatch):
+    from console import catalog
+
+    client, _app, _fake = api
+    csrf = login(client)
+    calls = []
+
+    def evict(_settings, max_bytes=None):
+        calls.append(max_bytes)
+        return {"max_bytes": max_bytes}
+
+    monkeypatch.setattr(catalog, "evict_cache", evict)
+    for value in ("10", 0, -1, True, False, 1.5, [], {}):
+        response = client.post("/api/v1/cache/evict", json={"max_bytes": value}, headers=authed_headers(csrf))
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert calls == []
+    for body in ({}, {"max_bytes": None}, {"max_bytes": 10}):
+        response = client.post("/api/v1/cache/evict", json=body, headers=authed_headers(csrf))
+        assert response.status_code == 200, response.text
+    assert calls == [None, None, 10]
+
+
+def test_connection_secret_reference_and_endpoint_types_are_validated(api):
+    client, app, _fake = api
+    csrf = login(client)
+    valid = {"display_name": "mock", "endpoint_url": "http://seaweedfs.local:8333", "secret_ref": "local-file:test/admin"}
+    for field in ("secret_ref", "endpoint_url"):
+        for value in (None, "", 1, True, [], {}):
+            response = client.post("/api/v1/connections", json={**valid, field: value}, headers=authed_headers(csrf))
+            assert response.status_code == 422, response.text
+            assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    response = client.post("/api/v1/connections", json={**valid, "endpoint_url": "http://[invalid"}, headers=authed_headers(csrf))
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "INVALID_ENDPOINT"
+    missing_secret = {key: value for key, value in valid.items() if key != "secret_ref"}
+    response = client.post("/api/v1/connections", json=missing_secret, headers=authed_headers(csrf))
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert response.json()["error"]["field"] == "secret_ref"
+    response = client.post("/api/v1/connections", json={**valid, "secret_ref": "local-file:test/unknown"}, headers=authed_headers(csrf))
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "SECRET_REF_NOT_FOUND"
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM storage_connections").fetchone()[0] == 0
+    response = client.post("/api/v1/connections", json=valid, headers=authed_headers(csrf))
+    assert response.status_code == 200, response.text
+    assert response.json()["endpoint_url"] == valid["endpoint_url"]
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM storage_connections").fetchone()[0] == 1
+
+
 def test_auth_logout_expiry_csrf_and_same_origin(api):
     client, app, _fake = api
     assert client.get("/api/v1/auth/me").status_code == 401

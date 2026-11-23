@@ -6,6 +6,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 
 from . import db
+from .request_validation import required_string as _required_string, string_list as _string_list
 from .security import AppError, mutation
 
 
@@ -149,20 +150,6 @@ def _reject_manual_secret(payload: Mapping[str, Any]) -> None:
     present = SECRET_FIELDS.intersection(payload.keys())
     if present:
         raise AppError("MANUAL_SECRET_IMPORT_UNSUPPORTED", "manual secret import is not supported; generate secrets server-side", 422)
-
-
-def _string_list(payload: Mapping[str, Any], field: str) -> list[str]:
-    value = payload.get(field, [])
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise AppError("INVALID_REQUEST", f"{field} must be a list of strings", 422, field=field)
-    return value
-
-
-def _required_string(payload: Mapping[str, Any], field: str, *, code: str = "INVALID_REQUEST") -> str:
-    value = payload.get(field)
-    if not isinstance(value, str) or not value:
-        raise AppError(code, f"{field} is required", 422, field=field)
-    return value
 
 
 def _optional_string(payload: Mapping[str, Any], field: str, default: str = "") -> str:

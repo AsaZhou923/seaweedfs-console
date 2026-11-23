@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from . import batch_operations, catalog, core, db, enhancements, jobs, management, management_conditions, management_grpc, management_native, management_objects, management_ops, management_resources, storage, table_preview
 from .config import Settings, get_settings, load_secret_registry
+from .request_validation import required_string
 from .security import AppError, current_user, mutation, validate_origin
 
 
@@ -107,12 +108,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/connections")
     def connection_create(request: Request, body: dict):
         mutation(request)
-        parsed = urlsplit(body.get("endpoint_url", ""))
+        endpoint_url = required_string(body, "endpoint_url")
+        secret_ref = required_string(body, "secret_ref")
+        try:
+            parsed = urlsplit(endpoint_url)
+        except ValueError as exc:
+            raise AppError("INVALID_ENDPOINT", "Invalid HTTP(S) endpoint", 422) from exc
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise AppError("INVALID_ENDPOINT", "需无凭据的HTTP(S)批准存储地址", 422)
         if body.get("addressing_style", "path") not in ("path", "virtual"):
             raise AppError("INVALID_REQUEST", "寻址类型无效", 422)
-        entry = load_secret_registry(settings).get(body.get("secret_ref"))
+        entry = load_secret_registry(settings).get(secret_ref)
         if not isinstance(entry, dict) or not entry.get("access_key_id") or not entry.get("secret_access_key"):
             raise AppError("SECRET_REF_NOT_FOUND", "请先在后端注册凭据引用", 403)
         body = dict(body)
