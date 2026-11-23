@@ -303,8 +303,24 @@ def test_connection_secret_reference_and_endpoint_types_are_validated(api):
             response = client.post("/api/v1/connections", json={**valid, field: value}, headers=authed_headers(csrf))
             assert response.status_code == 422, response.text
             assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    response = client.post("/api/v1/connections", json={**valid, "endpoint_url": "http://[invalid"}, headers=authed_headers(csrf))
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "INVALID_ENDPOINT"
+    missing_secret = {key: value for key, value in valid.items() if key != "secret_ref"}
+    response = client.post("/api/v1/connections", json=missing_secret, headers=authed_headers(csrf))
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert response.json()["error"]["field"] == "secret_ref"
+    response = client.post("/api/v1/connections", json={**valid, "secret_ref": "local-file:test/unknown"}, headers=authed_headers(csrf))
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "SECRET_REF_NOT_FOUND"
     with db.connect(app.state.settings) as conn:
         assert conn.execute("SELECT count(*) FROM storage_connections").fetchone()[0] == 0
+    response = client.post("/api/v1/connections", json=valid, headers=authed_headers(csrf))
+    assert response.status_code == 200, response.text
+    assert response.json()["endpoint_url"] == valid["endpoint_url"]
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM storage_connections").fetchone()[0] == 1
 
 
 def test_auth_logout_expiry_csrf_and_same_origin(api):

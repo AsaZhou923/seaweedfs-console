@@ -37,7 +37,7 @@ const managers = ["a", "b"].map((name) => ({
 }));
 
 async function startMock() {
-  const state = { hold: null, requests: [] };
+  const state = { hold: null, requests: [], buckets: ["bucket-a", "bucket-b"], versioning: {}, folders: {} };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://127.0.0.1");
@@ -62,6 +62,7 @@ async function startMock() {
       if (hold && hold.match(url, payload, req.method)) {
         hold.entered = true;
         await hold.promise;
+        if (hold.apply && hold.status === 200) hold.apply();
         if (hold.response) return json(res, hold.response, hold.status);
       }
       const apiPath = url.pathname.replace(/^\/api\/v1/, "");
@@ -70,14 +71,15 @@ async function startMock() {
       if (apiPath === `/projects/${project.id}/scopes`) return json(res, { items: scopes });
       if (apiPath === "/management/connections") return json(res, { items: managers });
       if (apiPath.endsWith("/files/delete-preview")) return json(res, { path: url.searchParams.get("path"), items: [], complete: true, truncated: false, preview_hash: "synthetic-empty-directory", entry_count: 0 });
-      if (apiPath.endsWith("/files")) return json(res, { items: [{ name: "empty", full_path: "/owned/empty", is_directory: true, size: 0 }], next_cursor: "" });
+      if (apiPath.endsWith("/files")) return json(res, { items: [{ name: "empty", full_path: "/owned/empty", is_directory: true, size: 0 }, ...(state.folders[url.searchParams.get("path")] || []).map((name) => ({ name, full_path: `${url.searchParams.get("path")}/${name}`, is_directory: true, size: 0 }))], next_cursor: "" });
       if (apiPath.endsWith("/objects/select")) return json(res, { object: { id: `object-${payload.key}`, key: payload.key, version_id: "version-1", scope_id: payload.scope_id } });
       if (apiPath.endsWith("/objects/version-info")) return json(res, { key: url.searchParams.get("key"), version_id: "version-1", etag: "synthetic-etag", can_delete: true, identity_strength: "strong" });
       if (apiPath.endsWith("/objects")) {
         const prefix = url.searchParams.get("scope_id") === "scope-b" ? "b/" : "a/";
         return json(res, { items: ["first", "second"].map((name) => ({ key: `${prefix}${name}`, size: 1, version_id: "version-1" })), folders: [], next_cursor: "" });
       }
-      if (apiPath.endsWith("/buckets")) return json(res, { items: [{ name: "bucket-a" }, { name: "bucket-b" }] });
+      if (apiPath.endsWith("/buckets")) return json(res, { items: state.buckets.map((name) => ({ name, versioning_status: state.versioning[name] || "Suspended" })) });
+      if (apiPath.endsWith("/versioning")) return json(res, { status: state.versioning[decodeURIComponent(apiPath.split("/").at(-2))] || "Suspended" });
       if (apiPath.endsWith("/policy")) return json(res, { Version: "2012-10-17", Statement: [], marker: apiPath.includes("bucket-a") ? "policy-a" : "policy-b" });
       return json(res, { items: [] });
     } catch (error) {
@@ -122,6 +124,9 @@ async function verifyManagementContexts(browser, pageFactory) {
   async function scenario(name, route, test) {
     let page;
     fixture.state.hold = null;
+    fixture.state.buckets = ["bucket-a", "bucket-b"];
+    fixture.state.versioning = {};
+    fixture.state.folders = {};
     try {
       page = await pageFactory(browser, `${fixture.base}/#${route}`);
       await until(() => page.eval(`Boolean(document.querySelector(".shell")) && document.querySelector(".topbar .managementSelector select")?.value === "manager-a"`), "authenticated context");
@@ -137,7 +142,7 @@ async function verifyManagementContexts(browser, pageFactory) {
   }
   try {
     for (const route of ["buckets", "files"]) {
-      for (const change of ["target", "connection", "round_trip", "same_target"]) {
+      for (const change of ["target", "connection", "round_trip", "same_target", "unmount"]) {
         for (const failure of [false, true]) {
           await scenario(`${route}_write_${failure ? "failure" : "success"}_after_${change}`, route, async (page) => {
             const bucket = route === "buckets";
@@ -158,10 +163,17 @@ async function verifyManagementContexts(browser, pageFactory) {
               ...gate(), match: (url, _payload, method) => url.pathname === writePath && method === (bucket ? "PUT" : "POST"),
               status: failure ? 422 : 200,
               response: failure ? { error: { code: "INVALID_REQUEST", message: marker } } : { status: "confirmed", operation_id: marker, result: { confirmed: true }, replayed: false },
+              apply: () => {
+                if (bucket) fixture.state.versioning["bucket-a"] = "Enabled";
+                else fixture.state.folders["/owned/a"] = ["child"];
+              },
             };
             await page.eval(`window.__contextTest.button(${JSON.stringify(bucket ? "Save versioning" : "Create directory")}).click()`);
             await until(() => fixture.state.hold.entered, "held old-target write");
-            if (change === "connection") {
+            if (change === "unmount") {
+              await page.eval(`location.hash = "objects"`);
+              await until(() => page.eval(`Boolean(window.__contextTest.button("View details"))`), "replacement page inventory");
+            } else if (change === "connection") {
               await page.eval(`window.__contextTest.manager("manager-b")`);
               await until(() => page.eval(`document.querySelector(".topbar .managementSelector select").value === "manager-b"`), "new management connection");
             } else if (change !== "same_target" && bucket) {
@@ -176,17 +188,26 @@ async function verifyManagementContexts(browser, pageFactory) {
                 await until(() => page.eval(`window.__contextTest.field("Path")?.value === "/owned/a"`), "original Filer path reloaded");
               }
             }
-            await until(() => page.eval(`!document.querySelector(".managementPage")?.textContent.includes("Loading") && ${bucket ? 'Boolean(window.__contextTest.button("bucket-a")) && (document.querySelector(".sectionHeading h2")?.textContent === "Select a bucket" || window.__contextTest.policyButton()?.disabled === false)' : 'Boolean(window.__contextTest.field("Path"))'}`), "new target reads settled");
+            if (change !== "unmount") await until(() => page.eval(`!document.querySelector(".managementPage")?.textContent.includes("Loading") && ${bucket ? 'Boolean(window.__contextTest.button("bucket-a")) && (document.querySelector(".sectionHeading h2")?.textContent === "Select a bucket" || window.__contextTest.policyButton()?.disabled === false)' : 'Boolean(window.__contextTest.field("Path"))'}`), "new target reads settled");
             const requestCount = fixture.state.requests.length;
             fixture.state.hold.release();
             await until(() => page.eval(`window.__contextResponseBodies.some((body) => body.includes(${JSON.stringify(marker)}))`), "old write response consumed");
             await page.eval(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
             assert.equal(await page.eval(`document.body.textContent.includes(${JSON.stringify(marker)})`), change === "same_target", "only the current target may display its write success or error");
-            if (change === "same_target" && !failure) {
+            const refreshTarget = !failure && (change === "same_target" || change === "round_trip");
+            const refreshInventory = bucket && !failure && change !== "connection" && change !== "unmount";
+            if (refreshTarget || refreshInventory) {
               await until(() => fixture.state.requests.length > requestCount, "current-target success refresh");
-              assert.ok(fixture.state.requests.slice(requestCount).some((item) => item.method === "GET" && (bucket ? item.path.includes("/buckets/bucket-a") : item.path.endsWith("/files") && item.query.path === "/owned/a")), "current-target success must refresh its own target");
             } else {
               assert.equal(fixture.state.requests.length, requestCount, "stale completion or a failed write must not refresh the target");
+            }
+            if (refreshTarget) {
+              await until(() => page.eval(bucket ? `document.querySelector(".bucketFacts dd")?.textContent === "Enabled"` : `Boolean(window.__contextTest.button("Open")) && [...document.querySelectorAll("td")].some((cell) => cell.textContent === "child")`), "updated original-target evidence displayed");
+            } else {
+              assert.equal(fixture.state.requests.slice(requestCount).some((item) => item.method === "GET" && (bucket ? /\/buckets\/[^/]+/.test(item.path) : item.path.endsWith("/files"))), false, "unrelated target details must not refresh");
+            }
+            if (refreshInventory) {
+              await until(() => page.eval(`[...document.querySelectorAll("tr")].some((row) => row.querySelector("button")?.textContent === "bucket-a" && row.textContent.includes("Enabled"))`), "updated bucket inventory evidence displayed");
             }
             const writes = fixture.state.requests.slice(firstRequest).filter((item) => item.method === (bucket ? "PUT" : "POST"));
             assert.equal(writes.length, 1, "the original write must dispatch exactly once");
@@ -196,11 +217,40 @@ async function verifyManagementContexts(browser, pageFactory) {
               assert.equal(writes[0].payload.folder_name, "child");
             }
             assert.equal(await page.eval(`document.querySelector(".topbar .managementSelector select").value`), change === "connection" ? "manager-b" : "manager-a");
-            if (!bucket) assert.equal(await page.eval(`window.__contextTest.field("Path").value`), change === "connection" ? "/" : change === "target" ? "/owned/b" : "/owned/a");
-            if (bucket) assert.equal(await page.eval(`document.querySelector(".sectionHeading h2").textContent`), change === "connection" ? "Select a bucket" : change === "target" ? "bucket-b" : "bucket-a");
+            if (change !== "unmount" && !bucket) assert.equal(await page.eval(`window.__contextTest.field("Path").value`), change === "connection" ? "/" : change === "target" ? "/owned/b" : "/owned/a");
+            if (change !== "unmount" && bucket) assert.equal(await page.eval(`document.querySelector(".sectionHeading h2").textContent`), change === "connection" ? "Select a bucket" : change === "target" ? "bucket-b" : "bucket-a");
           });
         }
       }
+    }
+
+    for (const action of ["create", "delete"]) {
+      await scenario(`bucket_${action}_refreshes_inventory_after_selection_change`, "buckets", async (page) => {
+        await until(() => page.eval(`Boolean(window.__contextTest.button("bucket-a"))`), "bucket inventory");
+        await page.eval(`window.__contextTest.button("bucket-a").click()`);
+        await until(() => page.eval(`window.__contextTest.policyButton()?.disabled === false`), "bucket-a detail");
+        const create = action === "create";
+        const writePath = create ? "/api/v1/management/manager-a/buckets" : "/api/v1/management/manager-a/buckets/bucket-a";
+        const marker = `receipt-${action}-bucket-a`;
+        fixture.state.hold = {
+          ...gate(), match: (url, _payload, method) => url.pathname === writePath && method === (create ? "POST" : "DELETE"),
+          status: 200, response: { status: "confirmed", operation_id: marker, result: { confirmed: true }, replayed: false },
+          apply: () => { fixture.state.buckets = create ? ["bucket-a", "bucket-b", "bucket-created"] : ["bucket-b"]; },
+        };
+        if (create) await page.eval(`window.__contextTest.set(window.__contextTest.field("Bucket"), "bucket-created")`);
+        await page.eval(`window.__contextTest.button(${JSON.stringify(create ? "Create bucket" : "Delete empty bucket")}).click()`);
+        await until(() => fixture.state.hold.entered, "held bucket inventory mutation");
+        await page.eval(`window.__contextTest.button("bucket-b").click()`);
+        await until(() => page.eval(`document.querySelector(".sectionHeading h2")?.textContent === "bucket-b" && window.__contextTest.policyButton()?.disabled === false && !document.querySelector(".managementPage")?.textContent.includes("Loading")`), "bucket-b detail loaded");
+        const requestCount = fixture.state.requests.length;
+        fixture.state.hold.release();
+        await until(() => page.eval(`window.__contextResponseBodies.some((body) => body.includes(${JSON.stringify(marker)}))`), "bucket mutation response consumed");
+        await until(() => page.eval(create ? `Boolean(window.__contextTest.button("bucket-created"))` : `!window.__contextTest.button("bucket-a") && Boolean(window.__contextTest.button("bucket-b"))`), "changed bucket inventory rendered");
+        assert.equal(await page.eval(`document.querySelector(".sectionHeading h2").textContent`), "bucket-b");
+        assert.equal(await page.eval(`document.body.textContent.includes(${JSON.stringify(marker)})`), false, "obsolete receipt must remain hidden after inventory refresh");
+        assert.equal(fixture.state.requests.slice(requestCount).some((item) => item.method === "GET" && /\/buckets\/[^/]+/.test(item.path)), false, "inventory refresh must not refresh unrelated bucket-b details");
+        assert.equal(fixture.state.requests.filter((item) => item.path === writePath && item.method === (create ? "POST" : "DELETE")).length, 1, "inventory mutation dispatches once");
+      });
     }
 
     await scenario("files_clear_confirmation_on_connection_switch", "files", async (page) => {

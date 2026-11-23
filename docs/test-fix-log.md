@@ -676,5 +676,5 @@ W01 继续为 WATCH：当前 foundation 只有 schema_migrations(version, applie
 
 ## 2026-11-23 · Bucket/Filer write receipts and request validation
 
-- **#28.** Eight mocked Chromium cases reproduced a late success or error after switching buckets or Filer paths on the previous implementation, including switching back to the original target. The fixed view discards both the obsolete notice and its refresh. Each write reaches the original target once.
+- **#28.** Eight mocked Chromium cases reproduced a late success or error after switching buckets or Filer paths on the previous implementation, including switching back to the original target. Each write reaches the original target once. Late notices stay out of the new view. A successful write refreshes the affected inventory or target data when visible.
 - **#43.** Four API tests exercise malformed required fields, object selections, connection fields and cache limits. They check for HTTP 422 and absence of storage dispatch, queued jobs, snapshots or cache eviction as applicable. Valid defaults, including a null cache limit, are covered.
