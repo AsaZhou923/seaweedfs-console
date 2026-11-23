@@ -20,8 +20,8 @@ async function until(predicate, label) {
   }
   throw new Error(`Timed out: ${label}`);
 }
-function json(res, value) {
-  res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+function json(res, value, status = 200) {
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   res.end(JSON.stringify(value));
 }
 
@@ -57,11 +57,12 @@ async function startMock() {
       for await (const chunk of req) chunks.push(chunk);
       const body = Buffer.concat(chunks).toString();
       const payload = body ? JSON.parse(body) : {};
-      state.requests.push({ path: url.pathname, method: req.method, payload });
+      state.requests.push({ path: url.pathname, method: req.method, payload, query: Object.fromEntries(url.searchParams) });
       const hold = state.hold;
-      if (hold && hold.match(url, payload)) {
+      if (hold && hold.match(url, payload, req.method)) {
         hold.entered = true;
         await hold.promise;
+        if (hold.response) return json(res, hold.response, hold.status);
       }
       const apiPath = url.pathname.replace(/^\/api\/v1/, "");
       if (apiPath === "/auth/me") return json(res, { user: { username: "synthetic" }, csrf_token: "synthetic-csrf", projects: [project] });
@@ -105,10 +106,12 @@ window.__contextTest = {
   policyButton() { return [...document.querySelectorAll(".formSection")].find((node) => node.querySelector("h3")?.textContent.trim() === "Bucket policy")?.querySelector("button"); }
 };
 window.__contextBodies = [];
+window.__contextResponseBodies = [];
 const originalText = Response.prototype.text;
 Response.prototype.text = async function () {
   const text = await originalText.call(this);
   window.__contextBodies.push(this.url);
+  window.__contextResponseBodies.push(text);
   return text;
 };
 `;
@@ -133,6 +136,73 @@ async function verifyManagementContexts(browser, pageFactory) {
     }
   }
   try {
+    for (const route of ["buckets", "files"]) {
+      for (const change of ["target", "connection", "round_trip", "same_target"]) {
+        for (const failure of [false, true]) {
+          await scenario(`${route}_write_${failure ? "failure" : "success"}_after_${change}`, route, async (page) => {
+            const bucket = route === "buckets";
+            const marker = `old-${route}-${change}-${failure ? "failure" : "success"}`;
+            const writePath = bucket ? "/api/v1/management/manager-a/buckets/bucket-a/versioning" : "/api/v1/management/manager-a/files/mkdir";
+            if (bucket) {
+              await until(() => page.eval(`Boolean(window.__contextTest.button("bucket-a"))`), "bucket inventory");
+              await page.eval(`window.__contextTest.button("bucket-a").click()`);
+              await until(() => page.eval(`window.__contextTest.button("Save versioning")?.disabled === false`), "bucket-a writable controls");
+            } else {
+              await until(() => page.eval(`Boolean(window.__contextTest.field("Path"))`), "file inventory");
+              await page.eval(`window.__contextTest.set(window.__contextTest.field("Path"), "/owned/a")`);
+              await page.eval(`window.__contextTest.set(window.__contextTest.field("New folder name"), "child")`);
+              await until(() => page.eval(`window.__contextTest.button("Create directory")?.disabled === false`), "file writable controls");
+            }
+            const firstRequest = fixture.state.requests.length;
+            fixture.state.hold = {
+              ...gate(), match: (url, _payload, method) => url.pathname === writePath && method === (bucket ? "PUT" : "POST"),
+              status: failure ? 422 : 200,
+              response: failure ? { error: { code: "INVALID_REQUEST", message: marker } } : { status: "confirmed", operation_id: marker, result: { confirmed: true }, replayed: false },
+            };
+            await page.eval(`window.__contextTest.button(${JSON.stringify(bucket ? "Save versioning" : "Create directory")}).click()`);
+            await until(() => fixture.state.hold.entered, "held old-target write");
+            if (change === "connection") {
+              await page.eval(`window.__contextTest.manager("manager-b")`);
+              await until(() => page.eval(`document.querySelector(".topbar .managementSelector select").value === "manager-b"`), "new management connection");
+            } else if (change !== "same_target" && bucket) {
+              await page.eval(`window.__contextTest.button("bucket-b").click()`);
+              await until(() => page.eval(`document.querySelector(".sectionHeading h2")?.textContent === "bucket-b"`), "new bucket selected");
+              if (change === "round_trip") await page.eval(`window.__contextTest.button("bucket-a").click()`);
+            } else if (change !== "same_target") {
+              await page.eval(`window.__contextTest.set(window.__contextTest.field("Path"), "/owned/b")`);
+              await until(() => page.eval(`window.__contextTest.field("Path")?.value === "/owned/b"`), "new Filer path loaded");
+              if (change === "round_trip") {
+                await page.eval(`window.__contextTest.set(window.__contextTest.field("Path"), "/owned/a")`);
+                await until(() => page.eval(`window.__contextTest.field("Path")?.value === "/owned/a"`), "original Filer path reloaded");
+              }
+            }
+            await until(() => page.eval(`!document.querySelector(".managementPage")?.textContent.includes("Loading") && ${bucket ? 'Boolean(window.__contextTest.button("bucket-a")) && (document.querySelector(".sectionHeading h2")?.textContent === "Select a bucket" || window.__contextTest.policyButton()?.disabled === false)' : 'Boolean(window.__contextTest.field("Path"))'}`), "new target reads settled");
+            const requestCount = fixture.state.requests.length;
+            fixture.state.hold.release();
+            await until(() => page.eval(`window.__contextResponseBodies.some((body) => body.includes(${JSON.stringify(marker)}))`), "old write response consumed");
+            await page.eval(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+            assert.equal(await page.eval(`document.body.textContent.includes(${JSON.stringify(marker)})`), change === "same_target", "only the current target may display its write success or error");
+            if (change === "same_target" && !failure) {
+              await until(() => fixture.state.requests.length > requestCount, "current-target success refresh");
+              assert.ok(fixture.state.requests.slice(requestCount).some((item) => item.method === "GET" && (bucket ? item.path.includes("/buckets/bucket-a") : item.path.endsWith("/files") && item.query.path === "/owned/a")), "current-target success must refresh its own target");
+            } else {
+              assert.equal(fixture.state.requests.length, requestCount, "stale completion or a failed write must not refresh the target");
+            }
+            const writes = fixture.state.requests.slice(firstRequest).filter((item) => item.method === (bucket ? "PUT" : "POST"));
+            assert.equal(writes.length, 1, "the original write must dispatch exactly once");
+            assert.equal(writes[0].path, writePath, "the original write must retain its management connection and bucket");
+            if (!bucket) {
+              assert.equal(writes[0].payload.path, "/owned/a", "the original Filer write must retain its path");
+              assert.equal(writes[0].payload.folder_name, "child");
+            }
+            assert.equal(await page.eval(`document.querySelector(".topbar .managementSelector select").value`), change === "connection" ? "manager-b" : "manager-a");
+            if (!bucket) assert.equal(await page.eval(`window.__contextTest.field("Path").value`), change === "connection" ? "/" : change === "target" ? "/owned/b" : "/owned/a");
+            if (bucket) assert.equal(await page.eval(`document.querySelector(".sectionHeading h2").textContent`), change === "connection" ? "Select a bucket" : change === "target" ? "bucket-b" : "bucket-a");
+          });
+        }
+      }
+    }
+
     await scenario("files_clear_confirmation_on_connection_switch", "files", async (page) => {
       await until(() => page.eval(`Boolean(window.__contextTest.button("Select for deletion"))`), "file inventory");
       await page.eval(`window.__contextTest.button("Select for deletion").click();`);

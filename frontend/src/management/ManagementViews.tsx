@@ -254,14 +254,20 @@ function BucketsPage({ request, managementId, connection }: { request: Requester
   const lifecycle = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/lifecycle`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const policy = useApi<Record<string, unknown>>(() => selected ? request(`/management/${managementId}/buckets/${encodeURIComponent(selected)}/policy`) : Promise.resolve({}), [managementId, selected, refreshKey]);
   const createInvalid = createForm.advanced && createForm.set_default_retention && (!Number.isInteger(Number(createForm.object_lock_duration)) || Number(createForm.object_lock_duration) < 1);
-  useEffect(() => {
+  const writeGeneration = useRef(0);
+  useLayoutEffect(() => {
+    writeGeneration.current += 1;
     setBucketForm({ owner: "", quota_size: "", quota_unit: "GB", quota_enabled: false });
     setSetting({ versioning: "Suspended", object_lock_configuration: "{\n  \"ObjectLockEnabled\": \"Enabled\"\n}", lifecycle: "{\n  \"rules\": []\n}", policy: "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": []\n}" });
     setNotice({ error: "", result: null });
+    return () => { writeGeneration.current += 1; };
   }, [managementId, selected]);
   async function bucketWrite(fn: () => Promise<unknown>) {
-    const result = await run(setNotice, fn);
-    if (result) setRefreshKey((value) => value + 1);
+    const generation = writeGeneration.current;
+    const result = await run((notice) => {
+      if (generation === writeGeneration.current) setNotice(notice);
+    }, fn);
+    if (result && generation === writeGeneration.current) setRefreshKey((value) => value + 1);
   }
   return (
     <section className="managementPage">
@@ -370,15 +376,20 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [notice, setNotice] = useState<Notice>({ error: "", result: null });
   const deletePreviewGeneration = useRef(0);
+  const writeGeneration = useRef(0);
   useLayoutEffect(() => {
     deletePreviewGeneration.current += 1;
+    writeGeneration.current += 1;
     setDeleteForm({ path: "" });
     setDeletePreview({ loading: false, error: "", data: null });
     setRenameForm({ source_path: "", target_path: "" });
     setUploadFile(null);
     setFolderName("");
     setNotice({ error: "", result: null });
-    return () => { deletePreviewGeneration.current += 1; };
+    return () => {
+      deletePreviewGeneration.current += 1;
+      writeGeneration.current += 1;
+    };
   }, [managementId, path]);
   function selectDeleteTarget(next: { path: string; is_directory?: boolean }) {
     deletePreviewGeneration.current += 1;
@@ -392,8 +403,11 @@ function FilesPage({ request, managementId, connection }: { request: Requester; 
   const canFileWrite = can(connection, "file.manage");
   const nextCursor = typeof files.data?.next_cursor === "string" ? files.data.next_cursor : "";
   async function fileWrite(fn: () => Promise<unknown>) {
-    const result = await run(setNotice, fn);
-    if (result) setRefreshKey((value) => value + 1);
+    const generation = writeGeneration.current;
+    const result = await run((notice) => {
+      if (generation === writeGeneration.current) setNotice(notice);
+    }, fn);
+    if (result && generation === writeGeneration.current) setRefreshKey((value) => value + 1);
   }
   function selectEntry(item: Record<string, unknown>) {
     const full = String(item.full_path || item.FullPath || item.path || "");
