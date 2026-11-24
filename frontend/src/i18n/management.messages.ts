@@ -637,4 +637,5 @@ export const managementMessages: Record<string, { en: string; "zh-CN": string }>
   "Protected paths": { en: "Protected paths", "zh-CN": "受保护路径说明" },
   "Filer Files": { en: "Filer Files", "zh-CN": "Filer 文件" },
   "Live Objects": { en: "Live Objects", "zh-CN": "实时对象" },
+  "The storage service cannot verify Legal Hold or retention for this null version. Deletion is blocked even when conditional deletion is supported.": { en: "The storage service cannot verify Legal Hold or retention for this null version. Deletion is blocked even when conditional deletion is supported.", "zh-CN": "存储服务无法核实此 null 版本的 Legal Hold 或保留状态。即使支持条件删除，此版本仍禁止删除。" },
 };

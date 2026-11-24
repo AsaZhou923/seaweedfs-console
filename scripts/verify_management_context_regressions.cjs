@@ -37,7 +37,7 @@ const managers = ["a", "b"].map((name) => ({
 }));
 
 async function startMock() {
-  const state = { hold: null, requests: [], buckets: ["bucket-a", "bucket-b"], versioning: {}, folders: {} };
+  const state = { hold: null, requests: [], buckets: ["bucket-a", "bucket-b"], versioning: {}, folders: {}, versionInfo: null };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://127.0.0.1");
@@ -73,7 +73,8 @@ async function startMock() {
       if (apiPath.endsWith("/files/delete-preview")) return json(res, { path: url.searchParams.get("path"), items: [], complete: true, truncated: false, preview_hash: "synthetic-empty-directory", entry_count: 0 });
       if (apiPath.endsWith("/files")) return json(res, { items: [{ name: "empty", full_path: "/owned/empty", is_directory: true, size: 0 }, ...(state.folders[url.searchParams.get("path")] || []).map((name) => ({ name, full_path: `${url.searchParams.get("path")}/${name}`, is_directory: true, size: 0 }))], next_cursor: "" });
       if (apiPath.endsWith("/objects/select")) return json(res, { object: { id: `object-${payload.key}`, key: payload.key, version_id: "version-1", scope_id: payload.scope_id } });
-      if (apiPath.endsWith("/objects/version-info")) return json(res, { key: url.searchParams.get("key"), version_id: "version-1", etag: "synthetic-etag", can_delete: true, identity_strength: "strong" });
+      if (apiPath.endsWith("/objects/version-info")) return json(res, { key: url.searchParams.get("key"), version_id: "version-1", etag: "synthetic-etag", can_delete: true, identity_strength: "strong", ...state.versionInfo });
+      if (apiPath.endsWith("/objects/check-conditional-delete")) return json(res, { status: "confirmed", operation_id: "synthetic-probe", replayed: false, capability_status: "supported", capability: "conditional_delete_if_match", result: { confirmed: true } });
       if (apiPath.endsWith("/objects")) {
         const prefix = url.searchParams.get("scope_id") === "scope-b" ? "b/" : "a/";
         return json(res, { items: ["first", "second"].map((name) => ({ key: `${prefix}${name}`, size: 1, version_id: "version-1" })), folders: [], next_cursor: "" });
@@ -127,6 +128,7 @@ async function verifyManagementContexts(browser, pageFactory) {
     fixture.state.buckets = ["bucket-a", "bucket-b"];
     fixture.state.versioning = {};
     fixture.state.folders = {};
+    fixture.state.versionInfo = null;
     try {
       page = await pageFactory(browser, `${fixture.base}/#${route}`);
       await until(() => page.eval(`Boolean(document.querySelector(".shell")) && document.querySelector(".topbar .managementSelector select")?.value === "manager-a"`), "authenticated context");
@@ -295,6 +297,38 @@ async function verifyManagementContexts(browser, pageFactory) {
       await page.eval(`window.__contextTest.button("Versions / Tags / Retention").click()`);
       assert.equal(await page.eval(`window.__contextTest.field("Object ID")?.value || ""`), "", "old selection must not reach parent operation inputs");
     });
+
+    for (const locale of ["en", "zh-CN"]) {
+      await scenario(`objects_block_unknown_null_protection_${locale}`, "objects", async (page) => {
+        fixture.state.versionInfo = { version_id: "null", identity_strength: "mutable", can_delete: false, delete_reason: "OBJECT_VERSION_PROTECTION_UNSUPPORTED", delete_block_reason: "OBJECT_VERSION_PROTECTION_UNSUPPORTED", legal_hold: null, retention_until: null };
+        await until(() => page.eval(`Boolean(window.__contextTest.button("View details"))`), "object inventory");
+        await page.eval(`window.__contextTest.chooseObject(0)`);
+        await until(() => page.eval(`Boolean(window.__contextTest.button("Read version identity"))`), "selected object");
+        await page.eval(`window.__contextTest.set(window.__contextTest.field("Version ID (optional)"), "null")`);
+        await page.eval(`window.__contextTest.button("Read version identity").click()`);
+        await until(() => page.eval(`document.body.textContent.includes("The storage service cannot verify Legal Hold or retention for this null version.")`), "unknown protection explanation");
+        const probeRequestsBefore = fixture.state.requests.filter((item) => item.path.endsWith("/objects/check-conditional-delete")).length;
+        await page.eval(`window.__contextTest.button("Probe conditional delete capability").click()`);
+        await until(() => fixture.state.requests.filter((item) => item.path.endsWith("/objects/check-conditional-delete")).length === probeRequestsBefore + 1, "conditional delete probe");
+        await until(() => page.eval(`document.body.textContent.includes("supported")`), "supported probe rendered");
+        await until(() => page.eval(`window.__contextBodies.filter((url) => new URL(url).pathname.endsWith("/objects/version-info")).length === 2`), "identity consumed after supported probe");
+        if (locale === "zh-CN") {
+          await page.eval(`window.__contextTest.set(document.querySelector(".languageSelector select"), "zh-CN")`);
+          await until(() => page.eval(`document.querySelector(".shell").dataset.locale === "zh-CN"`), "Chinese language");
+        }
+        const explanation = locale === "en"
+          ? "The storage service cannot verify Legal Hold or retention for this null version. Deletion is blocked even when conditional deletion is supported."
+          : "存储服务无法核实此 null 版本的 Legal Hold 或保留状态。即使支持条件删除，此版本仍禁止删除。";
+        await until(() => page.eval(`document.body.textContent.includes(${JSON.stringify(explanation)})`), "localized protection explanation");
+        await page.eval(`[...document.querySelectorAll("label.ack input")].forEach((node) => { if (!node.checked) node.click(); })`);
+        const deleteLabel = locale === "en" ? "Permanently delete this version" : "永久删除此版本";
+        assert.equal(await page.eval(`window.__contextTest.button(${JSON.stringify(deleteLabel)}).disabled`), true, "unknown version protection must block deletion despite confirmations and a supported probe");
+        await page.eval(`window.__contextTest.button(${JSON.stringify(deleteLabel)}).click()`);
+        assert.equal(fixture.state.requests.some((item) => item.path.endsWith("/objects/delete-version")), false, "disabled deletion must never dispatch");
+        assert.equal(await page.eval(`document.body.textContent.includes("OBJECT_VERSION_PROTECTION_UNSUPPORTED")`), true, "raw DTO must preserve protection code");
+        if (locale === "en") assert.equal(await page.eval(`document.querySelector(".stateList").textContent.includes("存储服务")`), false, "English protection status must be translated");
+      });
+    }
 
     await scenario("objects_clear_confirmed_target_on_connection_switch", "objects", async (page) => {
       await until(() => page.eval(`Boolean(window.__contextTest.button("View details"))`), "object inventory");

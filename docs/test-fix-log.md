@@ -678,3 +678,9 @@ W01 继续为 WATCH：当前 foundation 只有 schema_migrations(version, applie
 
 - **#28.** Eight mocked Chromium cases reproduced a late success or error after switching buckets or Filer paths on the previous implementation, including switching back to the original target. Each write reaches the original target once. Late notices stay out of the new view. A successful write refreshes the affected inventory or target data when visible.
 - **#43.** Four API tests exercise malformed required fields, object selections, connection fields and cache limits. They check for HTTP 422 and absence of storage dispatch, queued jobs, snapshots or cache eviction as applicable. Valid defaults, including a null cache limit, are covered.
+
+## 2026-11-24 · SeaweedFS 4.48 readback compatibility
+
+- **#46.** Synthetic IAM tests cover the nested access-key response, one-time credential visibility, service-account update fields and deletion readback. Browser checks open the first credential receipt and verify that replacing it with a replay removes the previous secret from the page.
+- **#58.** Backend tests distinguish an unsupported literal-null protection read from an active hold, future retention, access denial and other errors. Mocked Chromium checks verify that a successful If-Match probe cannot enable deletion when protection is unknown. The integration script now accepts a blocked outcome only after independently observing the upstream protection error and verifying the original version's ETag and bytes.
+- This round used synthetic services. The live observations for these cases are recorded in [issue #46](https://github.com/AsaZhou923/seaweedfs-console/issues/46) and [issue #58](https://github.com/AsaZhou923/seaweedfs-console/issues/58).

@@ -288,6 +288,7 @@
 - Filer browsing uses the full content width. File tools follow in a collapsible area with separate create, upload, rename, and delete groups. Keep preview/hash and permission guards intact.
 - Show a write notice only while the operator stays on the originating target. After a successful write, refresh the affected data that is currently visible. The bucket inventory belongs to the connection, while bucket details and Filer listings belong to a bucket or directory. Returning to that target before the write finishes should show its updated data.
 - Live Object context uses a definition list for bucket, authorized root prefix, and current browsing prefix. Each value is labeled once. Without a bound Scope, values remain unknown; an empty prefix means bucket root only after Scope binding is known.
+- When storage rejects an exact protection lookup for a literal null version, explain the blocked deletion in the selected language. Keep the storage capability code in the raw evidence. A successful conditional-delete probe does not clear this block.
 - Table pagination is a compact footer with first/next actions and muted status text. It does not use a bordered status card or imply that a missing cursor proves inventory completeness.
 - `scripts/verify_ui_layout.cjs` captures populated mocked Buckets, Files, Objects, Dashboard, and Assets. It checks spacing, read-only gates, separated bucket drafts, collapsed evidence, page errors, and document overflow at 1280/595/320 widths, with additional English desktop smoke. These captures are local UI evidence.
 

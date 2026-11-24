@@ -230,6 +230,10 @@ def _unlocked_version(s3, bucket, key, version_id, head):
         except Exception as exc:
             if storage._code_from_exception(exc) in missing_codes:
                 return missing_value
+            if (version_id == "null" and storage._code_from_exception(exc) == "InvalidRequest"
+                    and storage._status_from_exception(exc) == 400):
+                raise AppError("OBJECT_VERSION_PROTECTION_UNSUPPORTED",
+                               "Storage cannot establish protection for this null version; deletion is blocked.", 501) from None
             error = storage.sanitize_storage_exception(exc)
             raise AppError(error.code, str(error), error.status) from None
         if not isinstance(result, dict) or not isinstance(result.get(field), dict):
