@@ -1,6 +1,12 @@
 type Message = { en: string; "zh-CN": string };
 
 export const apiMessages: Record<string, Message> = {
+  "User access key inventory has an unexpected shape.": { en: "The service returned an unreadable access key list for this user.", "zh-CN": "服务返回的用户访问密钥列表格式异常，无法核验。" },
+  "Service account inventory is unavailable.": { en: "The service account list is unavailable.", "zh-CN": "无法读取服务账号列表。" },
+  "Service account inventory has an unexpected shape.": { en: "The service returned an unreadable service account list.", "zh-CN": "服务返回的账号列表格式异常，无法核验。" },
+  "Service account inventory must be a list.": { en: "The service account response did not contain a list.", "zh-CN": "服务账号响应中缺少有效的列表。" },
+  "Service account inventory has invalid identities.": { en: "The service account list contains missing or duplicate IDs.", "zh-CN": "服务账号列表中的 ID 缺失、无效或重复，无法核验。" },
+  "Storage cannot establish protection for this null version; deletion is blocked.": { en: "The storage service cannot verify Legal Hold or retention for this null version. Deletion is blocked.", "zh-CN": "存储服务无法核实此 null 版本的 Legal Hold 或保留状态，已禁止删除。" },
   "Multipart upload is not active.": { en: "Multipart upload is not active.", "zh-CN": "分段上传当前不是活动状态。" },
   "Scope prefix must be a string.": { en: "Scope prefix must be a string.", "zh-CN": "Scope 前缀必须是字符串。" },
   "Scope policy must be an object.": { en: "Scope policy must be an object.", "zh-CN": "Scope 策略必须是对象。" },

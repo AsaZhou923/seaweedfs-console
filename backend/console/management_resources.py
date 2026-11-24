@@ -101,6 +101,7 @@ def _mutate(
     readback: Callable[[], Any] | None = None,
     snapshot_filter: Callable[[Any], Any] | None = None,
     return_created_secret: bool = False,
+    created_credentials: Callable[[Any], Any] | None = None,
 ) -> dict[str, Any]:
     user = mutation(request)
     idempotency_key = request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
@@ -122,6 +123,7 @@ def _mutate(
         snapshot_filter=snapshot_filter,
         params=dict(params or {}) if params else None,
         return_created_secret=return_created_secret,
+        created_credentials=created_credentials,
     )
     return _redact(result, allow_created_secret=return_created_secret)
 
@@ -275,7 +277,7 @@ def _extract_access_keys(raw: Any) -> list[Mapping[str, Any]]:
 
 def _access_key_id(raw: Mapping[str, Any]) -> str | None:
     value = raw.get("access_key") or raw.get("AccessKey") or raw.get("access_key_id") or raw.get("AccessKeyId")
-    return str(value) if value else None
+    return value if isinstance(value, str) and value else None
 
 
 def _collection_contains(value: Any, expected: str, *fields: str) -> bool:
@@ -537,11 +539,55 @@ def _created_user_matches(username: str, expected: Mapping[str, Any]) -> Callabl
 
 
 def _created_access_key_visible(username: str) -> Callable[[Any, Any, Any], bool]:
-    def verify(_before: Any, after: Any, response: Any) -> bool:
-        key_id = _access_key_id(response) if isinstance(response, Mapping) else None
-        return bool(key_id) and isinstance(after, Mapping) and after.get("username") == username and any(_access_key_id(key) == key_id for key in _extract_access_keys(after))
+    def verify(before: Any, after: Any, response: Any) -> bool:
+        if not isinstance(response, Mapping):
+            return False
+        created = response.get("access_key") if isinstance(response.get("access_key"), Mapping) else response
+        key_id = _access_key_id(created)
+        old_keys = _user_access_key_ids(before, username)
+        new_keys = _user_access_key_ids(after, username)
+        return bool(key_id) and old_keys is not None and new_keys is not None and key_id not in old_keys and key_id in new_keys
 
     return verify
+
+
+def _user_access_key_ids(user: Any, username: str) -> set[str] | None:
+    if not isinstance(user, Mapping) or user.get("username") != username:
+        return None
+    if "access_keys" not in user and "AccessKeys" not in user:
+        return None
+    keys = user["access_keys"] if "access_keys" in user else user["AccessKeys"]
+    if keys is None:
+        return set()
+    if not isinstance(keys, list):
+        return None
+    identifiers = set()
+    for key in keys:
+        identifier = _access_key_id(key) if isinstance(key, Mapping) else None
+        if not identifier or identifier in identifiers:
+            return None
+        identifiers.add(identifier)
+    return identifiers
+
+
+def _access_key_creation_snapshot(username: str) -> Callable[[Any], Any]:
+    def validate(before: Any) -> Any:
+        if _user_access_key_ids(before, username) is None:
+            raise AppError("INVALID_USER_ACCESS_KEYS_RESPONSE", "User access key inventory has an unexpected shape.", 502)
+        return before
+
+    return validate
+
+
+def _created_access_key_credentials(response: Any) -> Any:
+    if not isinstance(response, Mapping):
+        return None
+    created = response.get("access_key") if isinstance(response.get("access_key"), Mapping) else response
+    key_id = _access_key_id(created)
+    secret = created.get("secret_key") or created.get("SecretKey") or created.get("secret_access_key") or created.get("SecretAccessKey")
+    if key_id and isinstance(secret, str) and secret and not secret.startswith("[REDACTED"):
+        return {"access_key": key_id, "secret_key": secret}
+    return None
 
 
 def _access_key_absent(username: str, access_key_id: str) -> Callable[[Any, Any, Any], bool]:
@@ -596,9 +642,35 @@ def _service_account_fields(account_id: str, expected: Mapping[str, Any]) -> Cal
         if not isinstance(after, Mapping):
             return False
         canonical = _canonical_service_account(after)
-        return canonical.get("id") == account_id and all(canonical.get(field) == value for field, value in expected.items())
+        # OSS 4.48 treats empty update strings as "leave the field unchanged".
+        return canonical.get("id") == account_id and all(canonical.get(field) == value for field, value in expected.items() if value != "")
 
     return verify
+
+
+def _service_account_readback(settings: Any, management: Mapping[str, Any], account_id: str) -> Any:
+    # The pinned Admin detail route can return 500 for an absent account. Its
+    # unfiltered collection API is complete and provides independent absence proof.
+    try:
+        data = _admin_read_json_for_management(settings, management, "/api/service-accounts")
+    except AppError as exc:
+        if exc.status == 404 or exc.code == "ADMIN_ENDPOINT_NOT_FOUND":
+            raise AppError("SERVICE_ACCOUNTS_UNAVAILABLE", "Service account inventory is unavailable.", 502) from exc
+        raise
+    if not isinstance(data, Mapping) or set(data) != {"service_accounts"}:
+        raise AppError("INVALID_SERVICE_ACCOUNTS_RESPONSE", "Service account inventory has an unexpected shape.", 502)
+    accounts = data["service_accounts"]
+    if accounts is None:
+        accounts = []  # Go serializes a nil slice as null.
+    if not isinstance(accounts, list):
+        raise AppError("INVALID_SERVICE_ACCOUNTS_RESPONSE", "Service account inventory must be a list.", 502)
+    indexed = {}
+    for account in accounts:
+        identifier = account.get("id") if isinstance(account, Mapping) else None
+        if not isinstance(identifier, str) or not identifier or identifier in indexed:
+            raise AppError("INVALID_SERVICE_ACCOUNTS_RESPONSE", "Service account inventory has invalid identities.", 502)
+        indexed[identifier] = account
+    return indexed.get(account_id)
 
 
 def _group_status(name: str, status: str) -> Callable[[Any, Any, Any], bool]:
@@ -1345,7 +1417,7 @@ def create_access_key(request: Request, management_id: str, username: str, body:
     body = body or {}
     if "access_key" in body or "secret_key" in body:
         raise AppError("MANUAL_SECRET_IMPORT_UNSUPPORTED", "manual access key import is not supported", 422)
-    return _mutate(request, mgmt, action="iam.manage", method="POST", path=f"/api/users/{_q(username)}/access-keys", payload={}, readback_path=f"/api/users/{_q(username)}", verify=_created_access_key_visible(username), return_created_secret=True)
+    return _mutate(request, mgmt, action="iam.manage", method="POST", path=f"/api/users/{_q(username)}/access-keys", payload={}, readback_path=f"/api/users/{_q(username)}", verify=_created_access_key_visible(username), snapshot_filter=_access_key_creation_snapshot(username), return_created_secret=True, created_credentials=_created_access_key_credentials)
 
 
 @router.delete("/{management_id}/iam/users/{username}/access-keys/{access_key_id}")
@@ -1440,7 +1512,7 @@ def update_service_account(request: Request, management_id: str, account_id: str
 def delete_service_account(request: Request, management_id: str, account_id: str):
     mgmt = _require_management(request, management_id, write=True)
     path = f"/api/service-accounts/{_q(account_id)}"
-    return _mutate(request, mgmt, action="iam.manage", method="DELETE", path=path, payload={}, readback=lambda: _admin_read_json_or_none(request.app.state.settings, mgmt, path), verify=_deleted)
+    return _mutate(request, mgmt, action="iam.manage", method="DELETE", path=path, payload={}, readback=lambda: _service_account_readback(request.app.state.settings, mgmt, account_id), verify=_deleted)
 
 
 @router.get("/{management_id}/iam/groups")

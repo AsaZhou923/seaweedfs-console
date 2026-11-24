@@ -516,3 +516,98 @@ def test_version_without_bucket_lock_requires_exact_version_protection_reads(bro
     assert len(calls) == 4
     assert all(target == {"Bucket": scope["bucket"], "Key": body["key"], "VersionId": "v1"}
                for _, target in calls)
+
+
+@pytest.mark.parametrize("operation", ["get_object_legal_hold", "get_object_retention"])
+@pytest.mark.parametrize("explicit_version", [False, True])
+def test_null_version_protection_invalid_request_is_unsupported_and_never_deletes(browser, monkeypatch, operation, explicit_version):
+    client, manager, scope, _, s3, cfg = browser
+    url, body, headers = writable(browser)
+    body["version_id"] = "null"
+    mutable_conditions(monkeypatch, True)
+    rejected_targets = []
+
+    def unavailable(**kwargs):
+        rejected_targets.append(kwargs)
+        raise S3Error("InvalidRequest", 400)
+
+    monkeypatch.setattr(s3, operation, unavailable)
+    with db.connect(cfg) as conn:
+        obj = core.upsert_object(conn, scope["id"], {"key": body["key"], "version_id": "null", "etag": '"etag"', "size": 3})
+        before = dict(conn.execute("SELECT * FROM objects WHERE id=?", (obj["id"],)).fetchone())
+    query = {"scope_id": scope["id"], "key": body["key"]}
+    if explicit_version:
+        query["version_id"] = "null"
+    info = client.get(f"/api/v1/management/{manager['id']}/objects/version-info", params=query)
+    assert info.status_code == 200, info.text
+    assert info.json()["version_id"] == "null"
+    assert info.json()["can_delete"] is False
+    assert info.json()["requires_probe"] is True
+    assert info.json()["delete_reason"] == "OBJECT_VERSION_PROTECTION_UNSUPPORTED"
+    assert info.json()["delete_block_reason"] == "OBJECT_VERSION_PROTECTION_UNSUPPORTED"
+
+    response = client.post(url, headers=headers, json=body)
+    assert response.status_code == 501, response.text
+    assert response.json()["error"]["code"] == "OBJECT_VERSION_PROTECTION_UNSUPPORTED"
+    assert not s3.deleted
+    assert not any("delete" in call for call in s3.calls)
+    assert rejected_targets == [{"Bucket": scope["bucket"], "Key": body["key"], "VersionId": "null"}] * 2
+    with db.connect(cfg) as conn:
+        assert dict(conn.execute("SELECT * FROM objects WHERE id=?", (obj["id"],)).fetchone()) == before
+        operation_row = conn.execute("SELECT state,error_code FROM management_operations").fetchone()
+        assert tuple(operation_row) == ("failed", "OBJECT_VERSION_PROTECTION_UNSUPPORTED")
+
+
+@pytest.mark.parametrize("version_id,upstream_code,upstream_status,expected_code,expected_status", [
+    ("v1", "InvalidRequest", 400, "STORAGE_REJECTED", 400),
+    ("null", "InvalidRequest", 403, "STORAGE_FORBIDDEN", 403),
+    ("null", "InvalidRequest", 500, "STORAGE_UNAVAILABLE", 503),
+    ("null", "InvalidArgument", 400, "STORAGE_REJECTED", 400),
+])
+def test_other_version_protection_failures_keep_existing_errors(browser, monkeypatch, version_id, upstream_code, upstream_status, expected_code, expected_status):
+    client, manager, scope, _, s3, _ = browser
+    url, body, headers = writable(browser)
+    body["version_id"] = version_id
+    mutable_conditions(monkeypatch, True)
+
+    def unavailable(**_kwargs):
+        raise S3Error(upstream_code, upstream_status)
+
+    monkeypatch.setattr(s3, "get_object_legal_hold", unavailable)
+    info = client.get(f"/api/v1/management/{manager['id']}/objects/version-info",
+                      params={"scope_id": scope["id"], "key": body["key"], "version_id": version_id})
+    assert info.status_code == 200, info.text
+    assert info.json()["can_delete"] is False
+    assert info.json()["delete_reason"] == expected_code
+    response = client.post(url, headers=headers, json=body)
+    assert response.status_code == expected_status, response.text
+    assert response.json()["error"]["code"] == expected_code
+    assert not any("delete" in call for call in s3.calls)
+
+
+@pytest.mark.parametrize("protection", ["hold", "retention"])
+def test_null_version_head_protection_precedes_unsupported_reads(browser, monkeypatch, protection):
+    from datetime import timedelta
+
+    client, manager, scope, _, s3, _ = browser
+    url, body, headers = writable(browser)
+    body["version_id"] = "null"
+    original_head = s3.head_object
+    fields = ({"ObjectLockLegalHoldStatus": "ON"} if protection == "hold"
+              else {"ObjectLockMode": "COMPLIANCE", "ObjectLockRetainUntilDate": datetime.now(timezone.utc) + timedelta(days=1)})
+    expected_code = "OBJECT_LEGAL_HOLD" if protection == "hold" else "OBJECT_RETENTION_ACTIVE"
+    monkeypatch.setattr(s3, "head_object", lambda **kwargs: {**original_head(**kwargs), **fields})
+
+    def unavailable(**_kwargs):
+        pytest.fail("active HEAD protection must block before the unsupported protection read")
+
+    monkeypatch.setattr(s3, "get_object_legal_hold", unavailable)
+    monkeypatch.setattr(s3, "get_object_retention", unavailable)
+    info = client.get(f"/api/v1/management/{manager['id']}/objects/version-info",
+                      params={"scope_id": scope["id"], "key": body["key"], "version_id": "null"})
+    assert info.status_code == 200, info.text
+    assert info.json()["delete_reason"] == expected_code
+    response = client.post(url, headers=headers, json=body)
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == expected_code
+    assert not any("delete" in call for call in s3.calls)

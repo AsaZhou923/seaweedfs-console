@@ -70,6 +70,8 @@ Management writes are disabled by default. Enable only the actions and target ra
 
 Bucket and Filer write results belong to the target where you submitted the change. If you switch buckets or directories before a write finishes, check operation history for its outcome before retrying.
 
+When creating an additional IAM access key, open **Execution result → Raw API evidence** and save the key pair from `created_credentials` in the first confirmed receipt. Replaying the operation returns its recorded outcome without the secret. On SeaweedFS 4.48, blank service-account update fields keep their current values.
+
 The image workbench uses the same visual layout as the management pages. Assets keeps filters and selection actions above the gallery, with jobs and duplicate/capacity evidence beside it. Jobs, Diagnostics, Operations, and Presets clear Scope-bound inputs and results when you change context.
 
 Use **Browse files** on a bucket row to open its contents, or **Configuration** to edit its settings. Live Objects resolves a matching Scope across your available projects and keeps the requested management connection and bucket. If scoped access needs configuration, the page shows the requested target and opens Settings with its connection and bucket filled in. After adding a Scope, return to that target to browse immediately.
@@ -86,6 +88,8 @@ pwsh -NoProfile -File scripts/start.ps1
 Keep your configuration environment variables set when restarting. API and worker processes can also be started separately from `backend/` with the same absolute data and credential paths.
 
 Copy batches and derived images require the source Scope’s original-download permission, including when a queued worker starts. Preview permission alone does not authorize exporting a full original or a derived image into another Scope. Version deletion checks the exact version’s legal hold and retention even when the bucket has no Object Lock configuration; unknown protection state blocks deletion.
+
+With versioning suspended, SeaweedFS 4.48 can reject protection lookups for the literal version ID `"null"`. The console disables deletion in that case, even if the endpoint passed the conditional-delete probe.
 
 ## Configuration
 

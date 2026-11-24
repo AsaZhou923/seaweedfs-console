@@ -1,9 +1,9 @@
 """Actual S3-backed conditional delete smoke for mutable null versions.
 
 This script creates one isolated random swc-management-* bucket, probes whether
-the storage endpoint honors DeleteObject IfMatch, then verifies manual deletion
-of unversioned and versioning-suspended null-version objects through the
-management API. It never writes global IAM, workers, tables, or production data.
+the storage endpoint honors DeleteObject IfMatch, then verifies unversioned
+deletion and the suspended literal-null protection contract. A backend that
+rejects the exact-version protection lookup must leave the object intact.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import secrets
 import shutil
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -197,6 +198,23 @@ def require_delete_confirmed(data: dict[str, Any], context: str) -> None:
         raise AssertionError(f"{context} was not confirmed by readback: {data}")
 
 
+def require_rejected_null_protection_read(s3, target: dict[str, str]) -> None:
+    from botocore.exceptions import ClientError
+
+    reads = ((s3.get_object_legal_hold, {"NoSuchObjectLegalHold"}),
+             (s3.get_object_retention, {"ObjectLockConfigurationNotFoundError", "NoSuchObjectLockConfiguration"}))
+    for read, absent in reads:
+        try:
+            read(**target)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code == "InvalidRequest" and exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 400:
+                return
+            if code not in absent:
+                raise
+    raise AssertionError("storage did not reject either exact-version protection read with HTTP 400 InvalidRequest")
+
+
 def mutable_delete_body(scope_id: str, key: str, etag: str, version_id: str | None = "null") -> dict[str, Any]:
     return {
         "scope_id": scope_id,
@@ -343,35 +361,40 @@ def run(argv: Sequence[str]) -> int:
         s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
         s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Suspended"})
         suspended_key = "raw/suspended-null.txt"
-        suspended_put = s3.put_object(Bucket=bucket, Key=suspended_key, Body=b"suspended-null-body")
-        suspended_head = s3.head_object(Bucket=bucket, Key=suspended_key)
+        s3.put_object(Bucket=bucket, Key=suspended_key, Body=b"suspended-null-body")
+        suspended_target = {"Bucket": bucket, "Key": suspended_key, "VersionId": "null"}
+        suspended_head = s3.head_object(**suspended_target)
         suspended_etag = suspended_head["ETag"]
-        suspended_version_id = suspended_put.get("VersionId") or suspended_head.get("VersionId") or "null"
-        if suspended_version_id not in {None, "", "null"}:
-            raise AssertionError(f"expected a suspended null version, got {suspended_version_id!r}")
-        suspended_info = assert_ok(client.get(info_url, params={"scope_id": scope["id"], "key": suspended_key}), "suspended null version-info")
-        if suspended_info.get("etag") != suspended_etag or suspended_info.get("identity_strength") not in {"mutable", "conditional"}:
+        suspended_info = assert_ok(client.get(info_url, params={"scope_id": scope["id"], "key": suspended_key, "version_id": "null"}), "suspended null version-info")
+        if (suspended_info.get("version_id") != "null" or suspended_info.get("etag") != suspended_etag
+                or suspended_info.get("identity_strength") not in {"mutable", "conditional"}):
             raise AssertionError(f"suspended version-info did not expose mutable identity: {suspended_info}")
-        deleted_suspended = assert_ok(
-            client.post(delete_url, headers=csrf_headers(csrf, idem="delete-suspended-null"), json=mutable_delete_body(scope["id"], suspended_key, suspended_etag)),
-            "delete suspended null object",
-        )
-        require_delete_confirmed(deleted_suspended, "delete suspended null object")
-        if object_head_state(s3, bucket, suspended_key) not in {"404", "NoSuchKey", "NotFound"}:
-            raise AssertionError("suspended null object still exists after delete")
-        replay_suspended = assert_ok(
-            client.post(delete_url, headers=csrf_headers(csrf, idem="delete-suspended-null"), json=mutable_delete_body(scope["id"], suspended_key, suspended_etag)),
-            "replay delete suspended null object",
-        )
-        if replay_suspended.get("replayed") is not True or replay_suspended.get("operation_id") != deleted_suspended.get("operation_id"):
-            raise AssertionError(f"suspended replay did not return same operation: {replay_suspended}")
-        evidence["steps"].append({
-            "step": "delete_suspended_null_confirmed",
-            "operation_id": deleted_suspended.get("operation_id"),
-            "etag": suspended_etag,
-            "head_after": object_head_state(s3, bucket, suspended_key),
-            "replay_same_operation": True,
-        })
+        delete_headers = csrf_headers(csrf, idem="delete-suspended-null")
+        delete_body = mutable_delete_body(scope["id"], suspended_key, suspended_etag)
+        if suspended_info.get("can_delete") is True:
+            deleted = assert_ok(client.post(delete_url, headers=delete_headers, json=delete_body), "delete suspended null object")
+            require_delete_confirmed(deleted, "delete suspended null object")
+            head_after = object_head_state(s3, bucket, suspended_key, "null")
+            if head_after not in {"404", "NoSuchKey", "NoSuchVersion", "NotFound"}:
+                raise AssertionError("suspended null version still exists after delete")
+            replay = assert_ok(client.post(delete_url, headers=delete_headers, json=delete_body), "replay suspended null delete")
+            if replay.get("replayed") is not True or not deleted.get("operation_id") or replay.get("operation_id") != deleted["operation_id"]:
+                raise AssertionError(f"suspended replay did not return same operation: {replay}")
+            evidence["steps"].append({"step": "delete_suspended_null_confirmed", "operation_id": deleted["operation_id"],
+                                      "etag": suspended_etag, "head_after": head_after, "replay_same_operation": True})
+        elif (suspended_info.get("can_delete") is False
+              and suspended_info.get("delete_block_reason") == "OBJECT_VERSION_PROTECTION_UNSUPPORTED"):
+            require_rejected_null_protection_read(s3, suspended_target)
+            assert_error(client.post(delete_url, headers=delete_headers, json=delete_body), "protection unavailable", 501,
+                         "OBJECT_VERSION_PROTECTION_UNSUPPORTED")
+            remaining = s3.get_object(**suspended_target)
+            with closing(remaining["Body"]) as stream:
+                if remaining.get("ETag") != suspended_etag or stream.read() != b"suspended-null-body":
+                    raise AssertionError("blocked deletion did not preserve the exact version")
+            evidence["steps"].append({"step": "suspended_null_protection_unsupported", "etag": suspended_etag,
+                                      "object_unchanged": True})
+        else:
+            raise AssertionError(f"unexpected suspended null deletion capability: {suspended_info}")
 
         operations = assert_ok(client.get(f"/api/v1/management/{manager['id']}/operations?limit=100"), "read management journal")
         condition_replay = assert_ok(client.post(check_url, headers=csrf_headers(csrf, idem="fresh-conditional-delete-probe"), json={"scope_id": scope["id"]}), "replay conditional delete probe")

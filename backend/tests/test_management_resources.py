@@ -473,6 +473,8 @@ def api(tmp_path: Path, monkeypatch):
 
     def perform_operation(settings, management, actor_id, action, method, path, payload, **kwargs):
         before = None
+        if kwargs.get("readback_path"):
+            before = json.loads(json.dumps(admin.get_json(kwargs["readback_path"], params=kwargs.get("readback_params"))))
         if kwargs.get("readback"):
             try:
                 before = kwargs["readback"]()
@@ -1494,6 +1496,239 @@ def test_created_user_credentials_require_known_wrapper_identity_and_visible_key
         'email': '', 'actions': ['Read'], 'policy_names': [], 'generate_key': True,
     })
     assert verify(None, after, response) is False
+
+
+def test_http_access_key_receipt_accepts_oss448_wrapper_and_keeps_secret_one_time(tmp_path, monkeypatch):
+    class WrappedKeyAdmin(HttpIamAdmin):
+        def _handle_api(self, method, path, body, params):
+            result = super()._handle_api(method, path, body, params)
+            if method == 'POST' and path == '/api/users/alice/access-keys':
+                return {'message': 'Access key created successfully', 'access_key': result}
+            return result
+
+    admin = WrappedKeyAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/users/alice/access-keys'
+    headers = {'Idempotency-Key': 'wrapped-access-key'}
+    created = client.post(url, json={}, headers=headers)
+    assert created.status_code == 200, created.text
+    assert created.json()['status'] == 'confirmed'
+    assert created.json()['created_credentials'] == {'access_key': 'AK1', 'secret_key': 'secret-1'}
+    assert created.json()['secret_receipt_available'] is True
+    assert 'secret-1' not in json.dumps(created.json()['result'])
+    replay = client.post(url, json={}, headers=headers)
+    assert replay.json()['status'] == 'confirmed' and replay.json()['replayed'] is True
+    assert replay.json()['secret_receipt_available'] is False
+    assert 'created_credentials' not in replay.json()
+    assert sum(method == 'POST' and path == '/api/users/alice/access-keys' for method, path, _ in admin.requests) == 1
+    with db.connect(settings) as conn:
+        assert all('secret-1' not in json.dumps(dict(row)) for row in conn.execute('SELECT * FROM management_operations'))
+    admin.ignore_writes = True
+    uncertain = client.post(url, json={}, headers={'Idempotency-Key': 'ignored-wrapped-key'})
+    assert uncertain.json()['status'] == 'needs_review'
+    assert uncertain.json()['secret_receipt_available'] is False
+    assert 'created_credentials' not in uncertain.json()
+    assert 'secret-2' not in uncertain.text
+    with db.connect(settings) as conn:
+        assert all('secret-2' not in json.dumps(dict(row)) for row in conn.execute('SELECT * FROM management_operations'))
+
+
+@pytest.mark.parametrize('response', [
+    {'access_key': {'access_key': 'wrong-key', 'secret_key': 'secret'}},
+    {'access_key': {'access_key': {'nested': 'AK1'}}},
+    {'access_key': None},
+    {'access_key': ['AK1']},
+])
+def test_created_access_key_rejects_malformed_or_unobserved_key(response):
+    before = {'username': 'alice', 'access_keys': []}
+    after = {'username': 'alice', 'access_keys': [{'access_key': 'AK1'}]}
+    assert management_resources._created_access_key_visible('alice')(before, after, response) is False
+    assert management_resources._created_access_key_visible('other')(before, after, {'access_key': {'access_key': 'AK1'}}) is False
+
+
+def test_http_access_key_does_not_substitute_unrelated_credentials(tmp_path, monkeypatch):
+    class MixedCredentialsAdmin(HttpIamAdmin):
+        def _handle_api(self, method, path, body, params):
+            result = super()._handle_api(method, path, body, params)
+            if method == 'POST' and path == '/api/users/alice/access-keys':
+                return {'unrelated': {'access_key': 'other-key', 'secret_key': 'other-secret'}, 'access_key': result}
+            return result
+
+    admin = MixedCredentialsAdmin()
+    _settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    result = client.post('/api/v1/management/mgmt_http/iam/users/alice/access-keys', json={},
+                         headers={'Idempotency-Key': 'mixed-credentials'})
+    assert result.json()['status'] == 'confirmed', result.text
+    assert result.json()['created_credentials'] == {'access_key': 'AK1', 'secret_key': 'secret-1'}
+    assert 'other-secret' not in result.text
+
+
+@pytest.mark.parametrize('response,expected', [
+    ({'AccessKeyId': 'AK1', 'SecretAccessKey': 'secret-1'}, {'access_key': 'AK1', 'secret_key': 'secret-1'}),
+    ({'access_key': {'access_key': 'AK1'}, 'unrelated': {'access_key': 'other', 'secret_key': 'other-secret'}}, None),
+    ({'access_key': {'access_key': 'AK1', 'secret_key': '[REDACTED]'}}, None),
+    ({'access_key': {'access_key': ['AK1'], 'secret_key': 'secret-1'}}, None),
+])
+def test_created_access_key_credentials_use_only_verified_object(response, expected):
+    assert management_resources._created_access_key_credentials(response) == expected
+
+
+@pytest.mark.parametrize('before_keys', [[{'access_key': 'AK1'}], [], None])
+def test_created_access_key_requires_new_identity_and_valid_inventory(before_keys):
+    response = {'access_key': {'access_key': 'AK1', 'secret_key': 'secret-1'}}
+    after = {'username': 'alice', 'access_keys': [{'access_key': 'AK1'}]}
+    verify = management_resources._created_access_key_visible('alice')
+    assert verify({'username': 'alice', 'access_keys': before_keys}, after, response) is (before_keys != [{'access_key': 'AK1'}])
+    assert verify({}, after, response) is False
+    assert verify({'username': 'other', 'access_keys': []}, after, response) is False
+    assert verify({'username': 'alice', 'access_keys': []}, {'username': 'alice'}, response) is False
+
+
+@pytest.mark.parametrize('before', [{'username': 'alice'}, {'username': 'other', 'access_keys': []},
+    {'username': 'alice', 'access_keys': {}}, {'username': 'alice', 'access_keys': [None]}])
+def test_http_access_key_invalid_before_inventory_prevents_dispatch(tmp_path, monkeypatch, before):
+    class InvalidUserAdmin(HttpIamAdmin):
+        def _user_details(self, username):
+            return before
+
+    admin = InvalidUserAdmin()
+    _settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    result = client.post('/api/v1/management/mgmt_http/iam/users/alice/access-keys', json={},
+                         headers={'Idempotency-Key': 'invalid-before'})
+    assert result.status_code == 502 and result.json()['error']['code'] == 'INVALID_USER_ACCESS_KEYS_RESPONSE', result.text
+    assert not any(method == 'POST' for method, _path, _body in admin.requests)
+
+
+def test_http_service_account_update_uses_oss448_empty_string_semantics(tmp_path, monkeypatch):
+    class EmptyUpdateAdmin(HttpIamAdmin):
+        def _handle_api(self, method, path, body, params):
+            if method == 'PUT' and path == '/api/service-accounts/sa-1':
+                if not self.ignore_writes:
+                    self.service_accounts['sa-1'].update({field: value for field, value in body.items() if value != ''})
+                return {'message': 'Service account updated successfully'}
+            return super()._handle_api(method, path, body, params)
+
+    admin = EmptyUpdateAdmin()
+    admin.service_accounts['sa-1'] = {'id': 'sa-1', 'parent_user': 'alice', 'status': 'Active',
+        'description': 'keep', 'expiration': '0001-01-01T00:00:00Z'}
+    _settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/service-accounts/sa-1'
+    result = client.put(url, json={'status': 'Inactive', 'description': 'updated', 'expiration': ''},
+                        headers={'Idempotency-Key': 'empty-expiration'})
+    assert result.status_code == 200 and result.json()['status'] == 'confirmed', result.text
+    assert result.json()['result']['readback']['expiration'] == '0001-01-01T00:00:00Z'
+    admin.service_accounts['sa-1']['expiration'] = '2027-01-01T00:00:00Z'
+    result = client.put(url, json={'status': 'Active', 'description': '', 'expiration': ''},
+                        headers={'Idempotency-Key': 'keep-expiration'})
+    assert result.json()['status'] == 'confirmed', result.text
+    assert result.json()['result']['readback']['description'] == 'updated'
+    assert result.json()['result']['readback']['expiration'] == '2027-01-01T00:00:00Z'
+    admin.ignore_writes = True
+    result = client.put(url, json={'status': 'Inactive', 'expiration': '2028-01-01T00:00:00Z'},
+                        headers={'Idempotency-Key': 'ignored-service-update'})
+    assert result.json()['status'] == 'needs_review', result.text
+
+
+@pytest.mark.parametrize('empty_inventory', [[], None, [{'id': 'unrelated-account', 'secret_access_key': 'unrelated-secret'}]])
+def test_http_service_account_delete_verifies_complete_inventory_and_replays_once(tmp_path, monkeypatch, empty_inventory):
+    class MissingDetailAdmin(HttpIamAdmin):
+        def handle(self, request):
+            if request.method == 'GET' and request.url.path == '/api/service-accounts/sa-1' and 'sa-1' not in self.service_accounts:
+                return self._json({'error': 'Failed to get service account details'}, status=500)
+            return super().handle(request)
+
+        def _service_list(self, parent_user=None):
+            result = super()._service_list(parent_user)
+            return result if result['service_accounts'] else {'service_accounts': empty_inventory}
+
+    admin = MissingDetailAdmin()
+    admin.service_accounts['sa-1'] = {'id': 'sa-1', 'parent_user': 'alice'}
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/service-accounts/sa-1'
+    headers = {'Idempotency-Key': 'delete-service'}
+    result = client.delete(url, headers=headers)
+    assert result.status_code == 200 and result.json()['status'] == 'confirmed', result.text
+    replay = client.delete(url, headers=headers)
+    assert replay.json()['status'] == 'confirmed' and replay.json()['replayed'] is True
+    assert sum(method == 'DELETE' and path == '/api/service-accounts/sa-1' for method, path, _ in admin.requests) == 1
+    assert not any(method == 'GET' and path == '/api/service-accounts/sa-1' for method, path, _ in admin.requests)
+    with db.connect(settings) as conn:
+        assert conn.execute('SELECT state FROM management_operations').fetchone()['state'] == 'confirmed'
+        saved = json.dumps([dict(row) for row in conn.execute('SELECT * FROM management_operations')])
+        assert 'unrelated-secret' not in saved and 'unrelated-account' not in saved
+
+
+@pytest.mark.parametrize('after', [{}, {'service_accounts': {}}, {'service_accounts': [None]},
+    {'service_accounts': [{'parent_user': 'alice'}]}, {'service_accounts': [{'id': 'sa-1'}, {'id': 'sa-1'}]},
+    {'service_accounts': [], 'next_cursor': 'more'}, {'service_accounts': [], 'error': 'unavailable'}])
+def test_http_service_account_delete_malformed_inventory_stays_uncertain(tmp_path, monkeypatch, after):
+    class MalformedInventoryAdmin(HttpIamAdmin):
+        def _service_list(self, parent_user=None):
+            return super()._service_list(parent_user) if 'sa-1' in self.service_accounts else after
+
+    admin = MalformedInventoryAdmin()
+    admin.service_accounts['sa-1'] = {'id': 'sa-1', 'parent_user': 'alice'}
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    result = client.delete('/api/v1/management/mgmt_http/iam/service-accounts/sa-1',
+                           headers={'Idempotency-Key': 'malformed-inventory-delete'})
+    assert result.status_code == 502, result.text
+    assert result.json()['error']['code'] == 'INVALID_SERVICE_ACCOUNTS_RESPONSE'
+    with db.connect(settings) as conn:
+        assert conn.execute('SELECT state FROM management_operations').fetchone()['state'] == 'needs_review'
+
+
+def test_http_service_account_delete_does_not_confirm_when_target_remains_or_inventory_fails(tmp_path, monkeypatch):
+    class FailingInventoryAdmin(HttpIamAdmin):
+        def handle(self, request):
+            if request.method == 'GET' and request.url.path == '/api/service-accounts' and 'sa-1' not in self.service_accounts:
+                return self._json({'error': 'storage failure'}, status=500)
+            return super().handle(request)
+
+    admin = FailingInventoryAdmin()
+    admin.service_accounts['sa-1'] = {'id': 'sa-1', 'parent_user': 'alice'}
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    url = '/api/v1/management/mgmt_http/iam/service-accounts/sa-1'
+    admin.ignore_writes = True
+    result = client.delete(url, headers={'Idempotency-Key': 'ignored-service-delete'})
+    assert result.status_code == 200 and result.json()['status'] == 'needs_review', result.text
+    admin.ignore_writes = False
+    result = client.delete(url, headers={'Idempotency-Key': 'unavailable-inventory-delete'})
+    assert result.status_code == 502, result.text
+    assert result.json()['error']['code'] == 'ADMIN_UPSTREAM_ERROR'
+    with db.connect(settings) as conn:
+        assert all(row['state'] == 'needs_review' for row in conn.execute('SELECT state FROM management_operations'))
+
+
+@pytest.mark.parametrize('after_dispatch', [False, True])
+def test_http_service_account_delete_rejects_missing_collection_endpoint(tmp_path, monkeypatch, after_dispatch):
+    class MissingInventoryAdmin(HttpIamAdmin):
+        def handle(self, request):
+            if request.method == 'GET' and request.url.path == '/api/service-accounts':
+                if not after_dispatch or 'sa-1' not in self.service_accounts:
+                    return self._json({'error': 'not found'}, status=404)
+            return super().handle(request)
+
+    admin = MissingInventoryAdmin()
+    admin.service_accounts['sa-1'] = {'id': 'sa-1', 'parent_user': 'alice'}
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    result = client.delete('/api/v1/management/mgmt_http/iam/service-accounts/sa-1',
+                           headers={'Idempotency-Key': 'missing-inventory-delete'})
+    assert result.status_code == 502 and result.json()['error']['code'] == 'SERVICE_ACCOUNTS_UNAVAILABLE', result.text
+    writes = [call for call in admin.requests if call[0] == 'DELETE']
+    assert len(writes) == int(after_dispatch)
+    with db.connect(settings) as conn:
+        assert conn.execute('SELECT state FROM management_operations').fetchone()['state'] == ('needs_review' if after_dispatch else 'failed')
+
+
+def test_service_account_readback_converts_direct_404_to_inventory_error(monkeypatch):
+    def missing(*_args):
+        raise AppError('NOT_FOUND', 'missing', 404)
+
+    monkeypatch.setattr(management_resources, '_admin_read_json_for_management', missing)
+    with pytest.raises(AppError) as caught:
+        management_resources._service_account_readback(None, {}, 'sa-1')
+    assert caught.value.status == 502
+    assert caught.value.code == 'SERVICE_ACCOUNTS_UNAVAILABLE'
 
 
 @pytest.mark.parametrize('field', ['Action', 'NotAction', 'Resource', 'NotResource'])

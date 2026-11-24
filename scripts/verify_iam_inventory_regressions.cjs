@@ -10,6 +10,8 @@ const scope = {id:'s',project_id:'p',connection_id:'c',display_name:'Scope',buck
 const writes = [];
 const reads = {};
 let revision = 0;
+let accessKeyReceipts = 0;
+const createdCredentials = {access_key:'SYNTHETIC-ONCE-PUBLIC',secret_key:'synthetic-once-secret'};
 const json = (res, value) => { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify(value)); };
 async function until(fn) { for(let i=0;i<200;i++){if(await fn())return;await new Promise(r=>setTimeout(r,25));}throw Error('condition timed out'); }
 const server = http.createServer(async(req,res)=>{
@@ -19,7 +21,14 @@ const server = http.createServer(async(req,res)=>{
     if(req.method!=='GET')writes.push({p,body:JSON.parse(body||'{}')});
     if(p.endsWith('/management/connections'))return json(res,{items:[{id:'m',name:'Synthetic',management_write_enabled:true,permissions:{'maintenance.execute':true,'iam.manage':true}}]});
     if(p.includes('/iam/')) {
-      if(req.method!=='GET'){revision++;return json(res,{status:'confirmed',operation_id:`operation-${revision}`,replayed:false,result:{confirmed:true}});}
+      if(req.method!=='GET'){
+        revision++;
+        if(p.endsWith('/users/user-new/access-keys')){
+          accessKeyReceipts++;
+          return json(res,{status:'confirmed',operation_id:'synthetic-access-key-operation',replayed:accessKeyReceipts>1,result:{confirmed:true},secret_receipt_available:accessKeyReceipts===1,...(accessKeyReceipts===1?{created_credentials:createdCredentials}:{})});
+        }
+        return json(res,{status:'confirmed',operation_id:`operation-${revision}`,replayed:false,result:{confirmed:true}});
+      }
       reads[p]=(reads[p]||0)+1;
       return json(res,{items:p.endsWith('/users')?[{username:`inventory-${revision}`}]:[]});
     }
@@ -59,6 +68,31 @@ const server = http.createServer(async(req,res)=>{
  assert.ok((await page.locator('table').filter({hasText:`inventory-${revision}`}).innerText()).includes('未知'));
  await page.locator('.languageSelector select').selectOption('en');
  assert.ok(!(await page.locator('table').filter({hasText:`inventory-${revision}`}).innerText()).includes('未知'));
- console.log(JSON.stringify({passed:4,cases:['IAM user mutations refresh inventories','IAM group/policy mutations refresh inventories','IAM service-account mutations refresh inventories','Populated IAM unknown fields switch English/Chinese'],browser:'sandboxed Chromium',service:'synthetic local HTTP'},null,2));
+ await button('Create access key').click();
+ const receipt=page.locator('.summary-card').filter({has:page.getByRole('heading',{name:'Execution result',exact:true})});
+ await until(()=>accessKeyReceipts===1);
+ await receipt.locator('.summary-raw summary').click();
+ const evidence=receipt.locator('.summary-raw pre');
+ await until(async()=>await evidence.isVisible()&&(await evidence.innerText()).includes(createdCredentials.secret_key));
+ const created=JSON.parse(await evidence.innerText());
+ assert.equal(created.status,'confirmed');
+ assert.equal(created.replayed,false);
+ assert.deepEqual(created.created_credentials,createdCredentials,'first confirmed receipt must expose the exact synthetic key pair');
+ assert.equal(created.secret_receipt_available,true);
+ await button('Create access key').click();
+ await until(()=>accessKeyReceipts===2);
+ await until(async()=>{
+   if(await evidence.count()!==1)return false;
+   const text=await evidence.textContent();
+   return text.length>0&&JSON.parse(text).replayed===true;
+ });
+ await receipt.locator('.summary-raw summary').click();
+ const replay=JSON.parse(await evidence.innerText());
+ assert.equal(replay.status,'confirmed');
+ assert.equal(replay.secret_receipt_available,false);
+ assert.ok(!Object.hasOwn(replay,'created_credentials'));
+ assert.ok(!(await page.locator('body').innerText()).includes(createdCredentials.secret_key),'replayed receipt must replace the one-time secret in visible content');
+ assert.ok(!(await page.locator('body').textContent()).includes(createdCredentials.secret_key),'replayed receipt must remove the one-time secret from raw evidence');
+ console.log(JSON.stringify({passed:6,cases:['IAM user mutations refresh inventories','IAM group/policy mutations refresh inventories','IAM service-account mutations refresh inventories','Populated IAM unknown fields switch English/Chinese','Confirmed access-key credentials are reachable in Raw API evidence','Replayed receipt removes the earlier one-time secret'],browser:'sandboxed Chromium',service:'synthetic local HTTP'},null,2));
  }finally{await browser.close();await new Promise(r=>server.close(r));}
 })().catch(e=>{console.error(e);server.close();process.exitCode=1;});

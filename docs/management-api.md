@@ -248,6 +248,14 @@ Filer file entries carry an `s3_object` identity with literal `bucket` and `key`
 - Copy and derivation submission and worker execution require `object:download_original` on the source Scope, in addition to existing destination write checks. Revoking this grant while a job is queued prevents original-byte reads and destination writes. Preview-only access does not authorize exported derivations.
 - Version information and version deletion share the same protection check. HEAD legal-hold/retention evidence and exact-version protection APIs remain authoritative even when bucket Object Lock configuration is absent. Active protection and unknown or malformed protection results block deletion.
 
+For the literal version ID `"null"`, an exact-version legal-hold or retention lookup returning HTTP 400 `InvalidRequest` leaves protection unknown. Version information returns HTTP 200 with `can_delete: false` and `delete_block_reason: "OBJECT_VERSION_PROTECTION_UNSUPPORTED"`. A matching delete attempt returns HTTP 501 with the same code before S3 deletion. A successful If-Match probe establishes only conditional-delete support. Unversioned requests (JSON `null`) follow their own protection checks.
+
+## IAM readback on SeaweedFS 4.48
+
+- Access-key creation reads the public ID from the Admin response's nested `access_key` object and checks it against the requested user's key inventory. The first confirmed response can return `created_credentials`. Operation history and replays omit the secret.
+- A service-account update verifies the requested account and nonempty update fields. The upstream service leaves blank fields untouched and can represent an unset expiration with the Go zero timestamp.
+- The service-account detail endpoint can return HTTP 500 after deletion. The console reads the unfiltered account list and checks for the exact account ID. A failed or malformed inventory read cannot confirm deletion.
+
 ## Request validation for project storage
 
 - Supply required names, object identifiers, keys, version IDs and snapshot IDs as JSON strings. Object keys retain their literal spelling, including spaces. For preview batches, checksum scans and snapshots, an explicit object selection uses an `object_ids` array of string IDs.
