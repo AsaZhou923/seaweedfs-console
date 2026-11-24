@@ -1,6 +1,7 @@
 type Message = { en: string; "zh-CN": string };
 
 export const apiMessages: Record<string, Message> = {
+  "User was not found.": { en: "User was not found.", "zh-CN": "找不到该用户。" },
   "User access key inventory has an unexpected shape.": { en: "The service returned an unreadable access key list for this user.", "zh-CN": "服务返回的用户访问密钥列表格式异常，无法核验。" },
   "Service account inventory is unavailable.": { en: "The service account list is unavailable.", "zh-CN": "无法读取服务账号列表。" },
   "Service account inventory has an unexpected shape.": { en: "The service returned an unreadable service account list.", "zh-CN": "服务返回的账号列表格式异常，无法核验。" },

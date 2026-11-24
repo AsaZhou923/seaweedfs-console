@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import re
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
 
@@ -102,6 +104,7 @@ def _mutate(
     snapshot_filter: Callable[[Any], Any] | None = None,
     return_created_secret: bool = False,
     created_credentials: Callable[[Any], Any] | None = None,
+    missing_before_error: AppError | None = None,
 ) -> dict[str, Any]:
     user = mutation(request)
     idempotency_key = request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
@@ -124,6 +127,7 @@ def _mutate(
         params=dict(params or {}) if params else None,
         return_created_secret=return_created_secret,
         created_credentials=created_credentials,
+        missing_before_error=missing_before_error,
     )
     return _redact(result, allow_created_secret=return_created_secret)
 
@@ -643,9 +647,33 @@ def _service_account_fields(account_id: str, expected: Mapping[str, Any]) -> Cal
             return False
         canonical = _canonical_service_account(after)
         # OSS 4.48 treats empty update strings as "leave the field unchanged".
-        return canonical.get("id") == account_id and all(canonical.get(field) == value for field, value in expected.items() if value != "")
+        if canonical.get("id") != account_id:
+            return False
+        for field, value in expected.items():
+            if value == "":
+                continue
+            if field == "expiration":
+                expected_instant = _expiration_instant(value)
+                if expected_instant is None or expected_instant != _expiration_instant(canonical.get(field), stored=True):
+                    return False
+            elif canonical.get(field) != value:
+                return False
+        return True
 
     return verify
+
+
+def _expiration_instant(value: Any, *, stored: bool = False) -> datetime | None:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)", value):
+        return None
+    if stored and re.search(r"\.\d*[1-9]\d*(?:Z|[+-])", value):
+        return None
+    try:
+        # The pinned Admin stores time.Parse(...).Unix(), discarding fractions.
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc).replace(microsecond=0)
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _service_account_readback(settings: Any, management: Mapping[str, Any], account_id: str) -> Any:
@@ -1417,7 +1445,7 @@ def create_access_key(request: Request, management_id: str, username: str, body:
     body = body or {}
     if "access_key" in body or "secret_key" in body:
         raise AppError("MANUAL_SECRET_IMPORT_UNSUPPORTED", "manual access key import is not supported", 422)
-    return _mutate(request, mgmt, action="iam.manage", method="POST", path=f"/api/users/{_q(username)}/access-keys", payload={}, readback_path=f"/api/users/{_q(username)}", verify=_created_access_key_visible(username), snapshot_filter=_access_key_creation_snapshot(username), return_created_secret=True, created_credentials=_created_access_key_credentials)
+    return _mutate(request, mgmt, action="iam.manage", method="POST", path=f"/api/users/{_q(username)}/access-keys", payload={}, readback_path=f"/api/users/{_q(username)}", verify=_created_access_key_visible(username), snapshot_filter=_access_key_creation_snapshot(username), return_created_secret=True, created_credentials=_created_access_key_credentials, missing_before_error=AppError("USER_NOT_FOUND", "User was not found.", 404))
 
 
 @router.delete("/{management_id}/iam/users/{username}/access-keys/{access_key_id}")

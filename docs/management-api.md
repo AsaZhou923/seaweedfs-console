@@ -250,10 +250,12 @@ Filer file entries carry an `s3_object` identity with literal `bucket` and `key`
 
 For the literal version ID `"null"`, an exact-version legal-hold or retention lookup returning HTTP 400 `InvalidRequest` leaves protection unknown. Version information returns HTTP 200 with `can_delete: false` and `delete_block_reason: "OBJECT_VERSION_PROTECTION_UNSUPPORTED"`. A matching delete attempt returns HTTP 501 with the same code before S3 deletion. A successful If-Match probe establishes only conditional-delete support. Unversioned requests (JSON `null`) follow their own protection checks.
 
+SeaweedFS 4.48 checks bucket versioning before serving these protection reads. A suspended bucket or an error reading its versioning state can yield the same upstream response. The code above describes the evidence available for this request. Strong version IDs in the same bucket still surface ordinary storage errors and remain blocked if protection cannot be verified.
+
 ## IAM readback on SeaweedFS 4.48
 
 - Access-key creation reads the public ID from the Admin response's nested `access_key` object and checks it against the requested user's key inventory. The first confirmed response can return `created_credentials`. Operation history and replays omit the secret.
-- A service-account update verifies the requested account and nonempty update fields. The upstream service leaves blank fields untouched and can represent an unset expiration with the Go zero timestamp.
+- A service-account update verifies the requested account and nonempty update fields. The upstream service leaves blank fields untouched and can represent an unset expiration with the Go zero timestamp. An explicit expiration is compared by the instant stored by 4.48, at whole-second precision, so a change of time-zone offset in the readback does not prevent confirmation.
 - The service-account detail endpoint can return HTTP 500 after deletion. The console reads the unfiltered account list and checks for the exact account ID. A failed or malformed inventory read cannot confirm deletion.
 
 ## Request validation for project storage

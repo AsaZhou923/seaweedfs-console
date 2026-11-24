@@ -98,7 +98,8 @@ def perform_operation(settings, management, actor_id, action, method, path, payl
                       expected_before_hash=None, verify: Callable | None = None,
                       return_created_secret=False, invoke: Callable | None = None,
                       readback: Callable | None = None, snapshot_filter: Callable | None = None,
-                      params=None, created_credentials: Callable | None = None):
+                      params=None, created_credentials: Callable | None = None,
+                      missing_before_error=None):
     """Record intent, dispatch once, verify readback, publish a redacted receipt.
 
     ``verify(before, after, response)`` is mandatory for confirmed success.
@@ -160,6 +161,8 @@ def perform_operation(settings, management, actor_id, action, method, path, payl
             try:
                 before = read()
             except AppError as exc:
+                if missing_before_error is not None and (exc.status == 404 or exc.code == "ADMIN_ENDPOINT_NOT_FOUND"):
+                    raise missing_before_error from exc
                 if exc.status != 404:
                     raise
         semantic = snapshot_filter(before) if snapshot_filter else before

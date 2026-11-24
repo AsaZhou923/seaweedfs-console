@@ -477,8 +477,10 @@ def api(tmp_path: Path, monkeypatch):
             before = json.loads(json.dumps(admin.get_json(kwargs["readback_path"], params=kwargs.get("readback_params"))))
         if kwargs.get("readback"):
             try:
-                before = kwargs["readback"]()
+                before = json.loads(json.dumps(kwargs["readback"]()))
             except AppError as exc:
+                if kwargs.get("missing_before_error") is not None and (exc.status == 404 or exc.code == 'ADMIN_ENDPOINT_NOT_FOUND'):
+                    raise kwargs["missing_before_error"] from exc
                 if exc.status != 404:
                     raise
         response = kwargs["invoke"]() if kwargs.get("invoke") else admin.request_json(method, path, payload)
@@ -1573,6 +1575,17 @@ def test_created_access_key_credentials_use_only_verified_object(response, expec
     assert management_resources._created_access_key_credentials(response) == expected
 
 
+def test_http_access_key_missing_user_keeps_404_and_never_dispatches(tmp_path, monkeypatch):
+    admin = HttpIamAdmin()
+    settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    result = client.post('/api/v1/management/mgmt_http/iam/users/missing/access-keys', json={},
+                         headers={'Idempotency-Key': 'missing-user-key'})
+    assert result.status_code == 404 and result.json()['error']['code'] == 'USER_NOT_FOUND', result.text
+    assert not any(method == 'POST' for method, _path, _body in admin.requests)
+    with db.connect(settings) as conn:
+        assert conn.execute('SELECT state FROM management_operations').fetchone()['state'] == 'failed'
+
+
 @pytest.mark.parametrize('before_keys', [[{'access_key': 'AK1'}], [], None])
 def test_created_access_key_requires_new_identity_and_valid_inventory(before_keys):
     response = {'access_key': {'access_key': 'AK1', 'secret_key': 'secret-1'}}
@@ -1584,10 +1597,15 @@ def test_created_access_key_requires_new_identity_and_valid_inventory(before_key
     assert verify({'username': 'alice', 'access_keys': []}, {'username': 'alice'}, response) is False
 
 
-@pytest.mark.parametrize('before', [{'username': 'alice'}, {'username': 'other', 'access_keys': []},
+@pytest.mark.parametrize('before', [None, {'username': 'alice'}, {'username': 'other', 'access_keys': []},
     {'username': 'alice', 'access_keys': {}}, {'username': 'alice', 'access_keys': [None]}])
 def test_http_access_key_invalid_before_inventory_prevents_dispatch(tmp_path, monkeypatch, before):
     class InvalidUserAdmin(HttpIamAdmin):
+        def handle(self, request):
+            if before is None and request.method == 'GET' and request.url.path == '/api/users/alice':
+                return httpx.Response(200, text='null', headers={'content-type': 'application/json'})
+            return super().handle(request)
+
         def _user_details(self, username):
             return before
 
@@ -1627,6 +1645,40 @@ def test_http_service_account_update_uses_oss448_empty_string_semantics(tmp_path
     result = client.put(url, json={'status': 'Inactive', 'expiration': '2028-01-01T00:00:00Z'},
                         headers={'Idempotency-Key': 'ignored-service-update'})
     assert result.json()['status'] == 'needs_review', result.text
+
+
+@pytest.mark.parametrize('requested,actual,state', [
+    ('2027-01-01T09:00:00+09:00', '2027-01-01T00:00:00Z', 'confirmed'),
+    ('2027-01-01T09:00:00.987654321+09:00', '2027-01-01T00:00:00Z', 'confirmed'),
+    ('2027-01-01T00:00:00.987654321Z', '2027-01-01T09:00:00+09:00', 'confirmed'),
+    ('2027-01-01T09:00:00+09:00', '2027-01-01T00:00:01Z', 'needs_review'),
+    ('2027-01-01T00:00:00.1Z', '2027-01-01T00:00:00.9Z', 'needs_review'),
+    ('2027-01-01T00:00:00Z', '2027-01-01T00:00:00.000000001Z', 'needs_review'),
+    ('2027-01-01T00:00:00Z', '2027-01-01T00:00:00', 'needs_review'),
+    ('2027-01-01T00:00:00', '2027-01-01T00:00:00Z', 'needs_review'),
+    ('2027-01-01T00:00:00Z', 'invalid', 'needs_review'),
+    ('invalid', 'invalid', 'needs_review'),
+    ('2027-01-01T00:00:00Z', None, 'needs_review'),
+    ('2027-01-01T00:00:00Z', 123, 'needs_review'),
+    ('2027-01-01T00:00:00Z', 'missing', 'needs_review'),
+])
+def test_http_service_account_expiration_compares_stored_instant(tmp_path, monkeypatch, requested, actual, state):
+    class ExpirationAdmin(HttpIamAdmin):
+        def _handle_api(self, method, path, body, params):
+            result = super()._handle_api(method, path, body, params)
+            if method == 'PUT' and path == '/api/service-accounts/sa-1':
+                if actual == 'missing':
+                    self.service_accounts['sa-1'].pop('expiration', None)
+                else:
+                    self.service_accounts['sa-1']['expiration'] = actual
+            return result
+
+    admin = ExpirationAdmin()
+    admin.service_accounts['sa-1'] = {'id': 'sa-1', 'parent_user': 'alice', 'status': 'Active', 'expiration': '2026-01-01T00:00:00Z'}
+    _settings, client = make_http_management_app(tmp_path, monkeypatch, admin)
+    result = client.put('/api/v1/management/mgmt_http/iam/service-accounts/sa-1', json={'expiration': requested},
+                        headers={'Idempotency-Key': 'expiration-instant'})
+    assert result.status_code == 200 and result.json()['status'] == state, result.text
 
 
 @pytest.mark.parametrize('empty_inventory', [[], None, [{'id': 'unrelated-account', 'secret_access_key': 'unrelated-secret'}]])
