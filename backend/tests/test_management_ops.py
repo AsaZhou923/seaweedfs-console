@@ -207,3 +207,79 @@ def test_filer_write_accepts_current_approved_roots_and_replays(ledger):
     replay = management_ops.perform_operation(**args)
     assert replay['status'] == 'confirmed' and replay['replayed'] is True
     assert len(calls) == 1
+
+
+def test_history_identifies_resource_and_native_actions_without_exposing_request_bodies(ledger):
+    cfg, manager = ledger
+    operations = [
+        ("POST", "/api/users", {"username": "alice", "description": "private-note"}),
+        ("DELETE", "/api/users/alice", {}),
+        ("PUT", "/api/groups/editors/status", {"enabled": True}),
+    ]
+    for index, (method, path, payload) in enumerate(operations):
+        management_ops.perform_operation(cfg, manager, "actor", "iam.manage", method, path, payload,
+                                         idempotency_key=str(index), invoke=lambda: {"success": True})
+    manager["permissions"] = {"file.manage": True, "file.write_roots": ["/owned"]}
+    with db.connect(cfg) as conn:
+        conn.execute("UPDATE management_connections SET permissions_json=? WHERE id='mg'", (json.dumps(manager["permissions"]),))
+    management_ops.perform_operation(cfg, manager, "actor", "file.rename", "POST", "/owned/target",
+                                     {"source_path": "/owned/source", "target_path": "/owned/target"},
+                                     idempotency_key="rename", invoke=lambda: {"success": True})
+    items = management_ops.list_operations(cfg, "mg")["items"]
+    by_path = {item["path"]: item for item in items}
+    assert by_path["/api/users"]["method"] == "POST"
+    assert by_path["/api/users"]["target"] == "username=alice"
+    assert by_path["/api/users/alice"]["method"] == "DELETE"
+    assert by_path["/api/users/alice"]["target"] == "/api/users/alice"
+    assert by_path["/api/groups/editors/status"]["method"] == "PUT"
+    assert by_path["/owned/target"]["target"] == "source_path=/owned/source, target_path=/owned/target"
+    serialized = json.dumps(items)
+    assert "private-note" not in serialized
+    assert "request_json" not in serialized and "idempotency_key" not in serialized
+
+
+def test_history_sanitizes_historical_paths_targets_and_malformed_payloads(ledger):
+    cfg, manager = ledger
+    for index, payload in enumerate((
+        {"username": "https://user:password@host/key?X-Amz-Signature=secret", "password": "plaintext", "session_token": "session-value"},
+        {"name": "name?token=hidden", "description": "private-description"},
+        {"name": "x" * 2000},
+        {},
+    )):
+        management_ops.perform_operation(cfg, manager, "actor", "iam.manage", "POST", "/api/users", {},
+                                         idempotency_key=str(index), invoke=lambda: {})
+        with db.connect(cfg) as conn:
+            conn.execute("UPDATE management_operations SET request_json=?,path=?,created_at='same' WHERE idempotency_key=?",
+                         (json.dumps(payload) if index != 3 else "invalid-json", "/api/users/alice?session=hidden-query#hidden-fragment", str(index)))
+    items = management_ops.list_operations(cfg, "mg")["items"]
+    assert all(item["path"] == "/api/users/alice" for item in items)
+    assert all(item["target"] is None or len(item["target"]) <= 1000 for item in items)
+    serialized = json.dumps(items)
+    for sensitive in ("password", "plaintext", "session-value", "hidden", "X-Amz-Signature", "private-description"):
+        assert sensitive not in serialized
+    assert "[REDACTED]" in serialized
+    assert items == sorted(items, key=lambda item: (item["created_at"], item["id"]), reverse=True)
+    assert management_ops.list_operations(cfg, "other")["items"] == []
+
+
+def test_history_includes_probe_method_target_and_deterministic_limit(ledger):
+    from console import management_conditions
+
+    cfg, manager = ledger
+    management_ops.perform_operation(cfg, manager, "actor", "iam.manage", "POST", "/api/users", {},
+                                     idempotency_key="regular", invoke=lambda: {})
+    with db.connect(cfg) as conn:
+        conn.execute("CREATE TABLE scopes(id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO scopes VALUES('scope')")
+        management_conditions.initialize(conn)
+        conn.execute("UPDATE management_operations SET created_at='same'")
+        conn.execute("""INSERT INTO management_condition_probes(
+            id,management_id,scope_id,actor_id,idempotency_key,request_hash,probe_key,state,created_at,updated_at
+            ) VALUES('zzz','mg','scope','actor','probe','hash','.console-probe/run','needs_review','same','same')""")
+    items = management_ops.list_operations(cfg, "mg", limit=1)["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == "zzz"
+    assert items[0]["method"] == "POST"
+    assert items[0]["path"] == "/objects/check-conditional-delete"
+    assert items[0]["target"] == "scope_id=scope, key=.console-probe/run"
+    assert items[0]["action"] == "object.condition.probe"

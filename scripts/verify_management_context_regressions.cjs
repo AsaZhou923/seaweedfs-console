@@ -33,7 +33,7 @@ const scopes = ["a", "b"].map((name) => ({
 const managers = ["a", "b"].map((name) => ({
   id: `manager-${name}`, name: `Manager ${name}`, admin_url: `http://synthetic-${name}.invalid`,
   s3_connection_id: "s3-a", management_write_enabled: true,
-  permissions: { "file.manage": true, "object.manage": true, "bucket.manage": true },
+  permissions: { "file.manage": true, "file.read_roots": ["/owned"], "object.manage": true, "bucket.manage": true },
 }));
 
 async function startMock() {
@@ -104,7 +104,8 @@ window.__contextTest = {
     node.dispatchEvent(new Event("change", { bubbles: true }));
   },
   manager(value) { this.set(document.querySelector(".topbar .managementSelector select"), value); },
-  scope(value) { this.set(document.querySelectorAll(".contextBar select")[1], value); },
+  scope(value) { this.set([...document.querySelectorAll(".managementPage label")].find((node) => node.textContent.trim().startsWith("Storage scope"))?.querySelector("select"), value); },
+  async path(value) { this.set(this.field("Path"), value); await new Promise((resolve) => requestAnimationFrame(resolve)); this.button("Go").click(); },
   chooseObject(index) { [...document.querySelectorAll("button")].filter((node) => node.textContent.trim() === "View details")[index].click(); },
   policyButton() { return [...document.querySelectorAll(".formSection")].find((node) => node.querySelector("h3")?.textContent.trim() === "Bucket policy")?.querySelector("button"); }
 };
@@ -156,7 +157,7 @@ async function verifyManagementContexts(browser, pageFactory) {
               await until(() => page.eval(`window.__contextTest.button("Save versioning")?.disabled === false`), "bucket-a writable controls");
             } else {
               await until(() => page.eval(`Boolean(window.__contextTest.field("Path"))`), "file inventory");
-              await page.eval(`window.__contextTest.set(window.__contextTest.field("Path"), "/owned/a")`);
+              await page.eval(`window.__contextTest.path("/owned/a")`);
               await page.eval(`window.__contextTest.set(window.__contextTest.field("New folder name"), "child")`);
               await until(() => page.eval(`window.__contextTest.button("Create directory")?.disabled === false`), "file writable controls");
             }
@@ -183,10 +184,10 @@ async function verifyManagementContexts(browser, pageFactory) {
               await until(() => page.eval(`document.querySelector(".sectionHeading h2")?.textContent === "bucket-b"`), "new bucket selected");
               if (change === "round_trip") await page.eval(`window.__contextTest.button("bucket-a").click()`);
             } else if (change !== "same_target") {
-              await page.eval(`window.__contextTest.set(window.__contextTest.field("Path"), "/owned/b")`);
+              await page.eval(`window.__contextTest.path("/owned/b")`);
               await until(() => page.eval(`window.__contextTest.field("Path")?.value === "/owned/b"`), "new Filer path loaded");
               if (change === "round_trip") {
-                await page.eval(`window.__contextTest.set(window.__contextTest.field("Path"), "/owned/a")`);
+                await page.eval(`window.__contextTest.path("/owned/a")`);
                 await until(() => page.eval(`window.__contextTest.field("Path")?.value === "/owned/a"`), "original Filer path reloaded");
               }
             }
@@ -219,7 +220,7 @@ async function verifyManagementContexts(browser, pageFactory) {
               assert.equal(writes[0].payload.folder_name, "child");
             }
             assert.equal(await page.eval(`document.querySelector(".topbar .managementSelector select").value`), change === "connection" ? "manager-b" : "manager-a");
-            if (change !== "unmount" && !bucket) assert.equal(await page.eval(`window.__contextTest.field("Path").value`), change === "connection" ? "/" : change === "target" ? "/owned/b" : "/owned/a");
+            if (change !== "unmount" && !bucket) assert.equal(await page.eval(`window.__contextTest.field("Path").value`), change === "connection" ? "/owned" : change === "target" ? "/owned/b" : "/owned/a");
             if (change !== "unmount" && bucket) assert.equal(await page.eval(`document.querySelector(".sectionHeading h2").textContent`), change === "connection" ? "Select a bucket" : change === "target" ? "bucket-b" : "bucket-a");
           });
         }
@@ -288,6 +289,8 @@ async function verifyManagementContexts(browser, pageFactory) {
       await until(() => fixture.state.hold.entered, "held old-scope selection");
       await page.eval(`window.__contextTest.scope("scope-b")`);
       await until(() => page.eval(`document.body.textContent.includes("b/first")`), "new scope list");
+      assert.equal(await page.eval(`new URLSearchParams(location.hash.split("?")[1]).get("scope")`), "scope-b", "page-local Scope selector navigates to the selected authorized Scope");
+      assert.equal(await page.eval(`new URLSearchParams(location.hash.split("?")[1]).get("bucket")`), "bucket-b", "page-local Scope selector can move to another authorized bucket");
       fixture.state.hold.release();
       await until(() => page.eval(`window.__contextBodies.some((path) => path.endsWith("/objects/select"))`), "old response consumed");
       await wait(30);

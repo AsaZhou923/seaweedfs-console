@@ -114,7 +114,7 @@ async function routeApi(req, res, url) {
     return json(res, { items: [{ object_id: "stale-group-member", source: "manual" }] });
   }
   if (pathname === "/api/v1/projects/project-2/groups/group-new-project/members") return json(res, { items: [{ object_id: "fresh-group-member", source: "manual" }] });
-  if (pathname === "/api/v1/management/connections") return json(res, { items: [{ id: "mgmt-1", name: "Mock Admin", admin_url: "http://mock-admin.invalid", s3_connection_id: "s3-1", protocol_baseline: "4.48", management_write_enabled: true, permissions: { "bucket.manage": true, "volume.manage": true, "file.manage": true, "object.manage": true, "table.manage": true, "mq.manage": true } }] });
+  if (pathname === "/api/v1/management/connections") return json(res, { items: [{ id: "mgmt-1", name: "Mock Admin", admin_url: "http://mock-admin.invalid", s3_connection_id: "s3-1", protocol_baseline: "4.48", management_write_enabled: true, permissions: { "bucket.manage": true, "volume.manage": true, "file.manage": true, "file.read_roots": ["/"], "object.manage": true, "table.manage": true, "mq.manage": true } }] });
   if (pathname === "/api/v1/management/connections/mgmt-1/access-policy" && method === "PUT") {
     const payload = body ? JSON.parse(body) : {};
     return json(res, { id: "mgmt-1", name: "Mock Admin", management_write_enabled: payload.management_write_enabled, permissions: payload.permissions || {}, updated: true });

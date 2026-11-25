@@ -239,6 +239,8 @@ Admin OIDC、Enterprise 集中监控/管理审计、PITR 等不冒充 OSS 功能
 
 The SPA accepts `#objects?management=<id>&bucket=<bucket>` and an optional `key` parameter, encoded with `URLSearchParams`. Explicit handoffs resolve authorized project Scopes through the existing project/Scope APIs, matching `s3_connection_id`, bucket, and the literal prefix of a requested key. A missing matching Scope opens a contextual Settings handoff for explicit configuration.
 
+Directory links for Live Objects include `scope` and `prefix` so that opening a copy of the address preserves the selected Scope even when several Scopes overlap. The prefix starts with the Scope's literal prefix. Filer directory links use `#files?management=<id>&path=<path>` and are bounded by the connection's permitted Filer read roots. Both links require normal authentication and authorization.
+
 Object browsing uses `GET /management/{id}/objects`. A Filer object handoff selects the exact key through `POST /management/{id}/objects/select`, and downloads use `GET /management/{id}/objects/download` with the resolved `scope_id`. The backend applies connection binding, Scope membership, and action permission checks on each call. The browser presents discovery failures and absent configuration separately from successful empty listings.
 
 Filer file entries carry an `s3_object` identity with literal `bucket` and `key` values derived from the original upstream path. Canonical `full_path` fields continue to serve native Filer controls. The S3 handoff consumes the explicit identity, preserving trailing spaces, repeated slashes, and encoded-looking characters. A missing identity produces a reload prerequisite.
@@ -257,6 +259,12 @@ SeaweedFS 4.48 checks bucket versioning before serving these protection reads. A
 - Access-key creation reads the public ID from the Admin response's nested `access_key` object and checks it against the requested user's key inventory. The first confirmed response can return `created_credentials`. Operation history and replays omit the secret.
 - A service-account update verifies the requested account and nonempty update fields. The upstream service leaves blank fields untouched and can represent an unset expiration with the Go zero timestamp. An explicit expiration is compared by the instant stored by 4.48, at whole-second precision, so a change of time-zone offset in the readback does not prevent confirmation.
 - The service-account detail endpoint can return HTTP 500 after deletion. The console reads the unfiltered account list and checks for the exact account ID. A failed or malformed inventory read cannot confirm deletion.
+
+## Version and operation history
+
+Object version lists expose `is_latest` for both object versions and delete markers. The value is `true` or `false` when storage supplies a boolean and `null` when it provides no usable value. Bucket inventory distinguishes an observed empty `versioning_status` (Off on 4.48) from missing status (Unknown).
+
+Management operation history includes the HTTP method, path and a display target where the journal retains enough information. The path omits URL queries and fragments. The target comes from recorded resource identifiers. Dedicated conditional-delete probes also identify their Scope and probe key.
 
 ## Request validation for project storage
 

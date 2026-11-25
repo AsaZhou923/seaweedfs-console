@@ -1326,7 +1326,13 @@ def list_object_versions(conn: sqlite3.Connection, adapter: Any, *, scope_id: st
     for item in versions:
         _record_version_observation(conn, scope_id, bucket, key, item)
     conn.commit()
-    return {"status": "succeeded", "versions": [_identity_payload(item) | {"is_delete_marker": bool(_get_attr(item, "is_delete_marker"))} for item in versions]}
+    return {"status": "succeeded", "versions": [
+        _identity_payload(item) | {
+            "is_delete_marker": bool(_get_attr(item, "is_delete_marker")),
+            "is_latest": _get_attr(item, "is_latest") if isinstance(_get_attr(item, "is_latest"), bool) else None,
+        }
+        for item in versions
+    ]}
 
 
 def restore_object_version(

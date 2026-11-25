@@ -16,6 +16,13 @@ from console.config import Settings
 from console.security import AppError
 
 
+def test_bucket_projection_preserves_never_enabled_versioning_and_missing_status():
+    assert management_resources._canonical_bucket({"name": "never-enabled", "versioning_status": ""}) == {
+        "name": "never-enabled", "versioning_status": "",
+    }
+    assert management_resources._canonical_bucket({"name": "unknown"}) == {"name": "unknown"}
+
+
 class S3Error(Exception):
     def __init__(self, code: str, message: str = "sensitive url https://secret.example.invalid?X-Amz-Signature=hidden"):
         super().__init__(message)

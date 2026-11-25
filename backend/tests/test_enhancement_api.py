@@ -104,6 +104,36 @@ class FakeClientError(Exception):
         self.response = {"ResponseMetadata": {"HTTPStatusCode": status}}
 
 
+def test_version_list_preserves_latest_true_false_and_unknown_for_versions_and_markers(settings):
+    setup_variant(settings)
+
+    class VersionS3:
+        def list_object_versions(self, **kwargs):
+            assert kwargs == {"Bucket": "bucket", "Prefix": "in.jpg"}
+            return {
+                "Versions": [
+                    {"Key": "in.jpg", "VersionId": "v1", "IsLatest": True},
+                    {"Key": "in.jpg", "VersionId": "v2", "IsLatest": False},
+                    {"Key": "in.jpg", "VersionId": "legacy"},
+                    {"Key": "in.jpg", "VersionId": "invalid", "IsLatest": "false"},
+                    {"Key": "in.jpg.other", "VersionId": "excluded", "IsLatest": True},
+                ],
+                "DeleteMarkers": [
+                    {"Key": "in.jpg", "VersionId": "d1", "IsLatest": True},
+                    {"Key": "in.jpg", "VersionId": "d2", "IsLatest": False},
+                    {"Key": "in.jpg", "VersionId": "d3"},
+                ],
+            }
+
+    adapter = enhancement_api.S3EnhancementAdapter(VersionS3())
+    with db.connect(settings) as conn:
+        result = enhancements.list_object_versions(conn, adapter, scope_id="s", bucket="bucket", key="in.jpg")
+    versions = result["versions"]
+    assert [item["is_latest"] for item in versions] == [True, False, None, None, True, False, None]
+    assert [item["is_delete_marker"] for item in versions] == [False, False, False, False, True, True, True]
+    assert all(item["bucket"] == "bucket" and item["key"] == "in.jpg" for item in versions)
+
+
 class FakeImaging:
     PIPELINE_VERSION = "test-pipeline"
 
