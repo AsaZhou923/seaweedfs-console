@@ -57,7 +57,7 @@ function scopedLocation(prefix, scope = "scope-b", manager = "manager-a") {
 
 async function startMock(options = {}) {
   const state = {
-    scopes: { "project-a": options.alternateScope ? [scopeA, { ...scopeB, id: "scope-alternate", project_id: "project-a", display_name: "Alternate scope" }] : [scopeA], "project-b": options.withScope ? [{ ...scopeB, allow_original_download: options.download !== false }, scopeOther, ...(options.overlappingScope ? [{ ...scopeB, id: "scope-narrow", display_name: "Narrow literal scope", prefix: "literal2026/" }] : [])] : [] },
+    scopes: { "project-a": options.alternateScope ? [scopeA, { ...scopeB, id: "scope-alternate", project_id: "project-a", display_name: "Alternate scope" }] : [scopeA], "project-b": options.withScope ? [...(options.prependScopes || []), { ...scopeB, allow_original_download: options.download !== false }, scopeOther, ...(options.overlappingScope ? [{ ...scopeB, id: "scope-narrow", display_name: "Narrow literal scope", prefix: "literal2026/" }] : [])] : [] },
     requests: [], gates: options.hold ? [gate(options.hold)] : [], failScopes: Boolean(options.failScopes), failObjects: Boolean(options.failObjects), failFiles: Boolean(options.failFiles), empty: Boolean(options.empty),
     authenticated: options.authenticated !== false,
     objectIdentity: options.objectIdentity !== false,
@@ -94,7 +94,7 @@ async function startMock(options = {}) {
         response = state.failRefreshConnections ? { error: { code: "SYNTHETIC_REFRESH_FAILURE", message: "Settings refresh failed" } } : { items: ["a", "b"].map((id) => ({ id: `s3-${id}`, display_name: `S3 ${id}`, endpoint_url: `http://s3-${id}.invalid` })) };
         status = state.failRefreshConnections ? 503 : 200;
       } else if (request.path === "/management/connections") {
-        response = { items: options.navigation ? managers.map((manager) => ({ ...manager, permissions: { ...manager.permissions, "file.read_roots": ["/allowed"] } })) : managers };
+        response = { items: options.navigation ? managers.map((manager) => ({ ...manager, permissions: { ...manager.permissions, "file.read_roots": options.fileRoots || ["/allowed"] } })) : managers };
       } else if (/^\/projects\/[^/]+\/scopes$/.test(request.path)) {
         const projectId = request.path.split("/")[2];
         if (req.method === "POST") {
@@ -104,7 +104,7 @@ async function startMock(options = {}) {
           } else {
             const created = { ...scopeB, ...payload, ...payload.scope_policy, id: "scope-created", project_id: projectId };
             state.scopes[projectId].push(created);
-            response = created;
+            response = { ...created, ...options.createdScopeResponse };
           }
         } else {
           response = state.failScopes ? { error: { code: "SYNTHETIC_SCOPE_FAILURE", message: "Scope lookup failed" } } : { items: [...state.scopes[projectId]] };
@@ -178,18 +178,150 @@ async function run() {
     for (const [key, value] of Object.entries(expected)) assert.equal(actual[key], value, `location ${key}`);
     assert.ok(Object.keys(actual).every((key) => ["management", "bucket", "scope", "prefix", "path", "key"].includes(key)), "locations contain navigational identity only");
   }
-  async function fileAt(page, expected) {
+  async function fileAt(page, expected, manager = "manager-a") {
     await until(async () => await page.getByLabel("Path", { exact: true }).inputValue() === expected, `Filer path ${expected}`);
     await page.getByRole("table", { name: "Filer directory entries" }).getByText("navigation.txt", { exact: true }).waitFor();
     await page.getByRole("table", { name: "Filer directory entries" }).getByText(`entry-at-${expected}`, { exact: true }).waitFor();
-    await assertLocation(page, { management: "manager-a", path: expected });
+    await assertLocation(page, { management: manager, path: expected });
   }
-  async function objectsAt(page, prefix, scope = "scope-b") {
+  async function objectsAt(page, prefix, scope = "scope-b", manager = "manager-a") {
     await inventory(page).getByText(`${prefix}navigation.jpg`, { exact: true }).waitFor();
-    await assertLocation(page, { management: "manager-a", bucket: "bucket-b", scope, prefix });
+    await assertLocation(page, { management: manager, bucket: "bucket-b", scope, prefix });
   }
 
   try {
+    for (const route of ["files", "objects"]) {
+      const initial = route === "files" ? fileLocation("/allowed/team/nested") : scopedLocation("literal2026/team/");
+      await scenario(`review_sidebar_${route}_remembers_locations_per_connection`, initial, { withScope: true, navigation: true }, async (page, { state }) => {
+        const show = async (manager, value) => route === "files" ? fileAt(page, value, manager) : objectsAt(page, value, manager === "manager-a" ? "scope-b" : "scope-other", manager);
+        await show("manager-a", route === "files" ? "/allowed/team/nested" : "literal2026/team/");
+        const changeElsewhere = async (manager) => {
+          await page.locator('#main-navigation a[href="#buckets"]').click();
+          await page.getByRole("table", { name: "SeaweedFS buckets" }).waitFor();
+          const before = state.requests.length;
+          await page.locator(".topbar .managementSelector select").selectOption(manager);
+          await until(() => state.requests.slice(before).some((request) => request.path === `/management/${manager}/buckets`), "newly chosen connection inventory");
+          await page.locator(`#main-navigation a[href^="#${route}"]`).click();
+        };
+        await changeElsewhere("manager-b");
+        await show("manager-b", route === "files" ? "/allowed" : "literal");
+        assert.equal(await page.locator(".topbar .managementSelector select").inputValue(), "manager-b", "sidebar return cannot undo an explicit connection choice");
+        const next = route === "files" ? "/allowed/b-team" : "literalb/";
+        const field = page.getByLabel(route === "files" ? "Path" : "Object prefix", { exact: true });
+        await field.fill(next);
+        await field.press("Enter");
+        await show("manager-b", next);
+        await changeElsewhere("manager-a");
+        await show("manager-a", route === "files" ? "/allowed/team/nested" : "literal2026/team/");
+        await changeElsewhere("manager-b");
+        await show("manager-b", next);
+      });
+    }
+
+    for (const withScope of [false, true]) {
+      await scenario(`review_setup_stale_scope_selects_new_scope_${withScope ? "existing_alternative" : "new_only"}`, scopedLocation("literal2026/team/", "ghost-scope"), {
+        withScope, navigation: true, allowScopeCreation: true,
+      }, async (page, { state }) => {
+        await missingScope(page).waitFor();
+        await page.getByRole("link", { name: "Configure scoped access", exact: true }).click();
+        await page.getByLabel("Prefix", { exact: true }).waitFor();
+        assert.equal(await page.getByLabel("Prefix", { exact: true }).inputValue(), "literal2026/team/", "prefix-only setup must prefill the requested directory");
+        const returnParams = new URLSearchParams((await page.getByRole("link", { name: "Return to requested bucket", exact: true }).getAttribute("href")).split("?")[1]);
+        assert.equal(returnParams.has("scope"), false, "return without creating cannot retain a stale Scope binding");
+        await page.getByRole("button", { name: "Add scope", exact: true }).click();
+        await objectsAt(page, "literal2026/team/", "scope-created");
+        assert.ok(objectRequests(state).every((request) => request.query.scope_id === "scope-created"), "newly created Scope must win over an existing covering Scope");
+        const created = state.requests.filter((request) => request.method === "POST" && request.path.endsWith("/scopes"));
+        assert.equal(created.length, 1);
+        assert.equal(created[0].payload.prefix, "literal2026/team/");
+        assert.equal(created[0].payload.connection_id, "s3-a");
+      });
+    }
+
+    await scenario("review_setup_return_without_create_resolves_existing_scope", scopedLocation("literal2026/team/", "ghost-scope"), {
+      withScope: true, navigation: true,
+    }, async (page, { state }) => {
+      await missingScope(page).waitFor();
+      await page.getByRole("link", { name: "Configure scoped access", exact: true }).click();
+      await page.getByRole("link", { name: "Return to requested bucket", exact: true }).click();
+      await objectsAt(page, "literal2026/team/");
+      assert.equal(state.requests.some((request) => request.method === "POST" && request.path.endsWith("/scopes")), false, "return without creation must use existing authorized access");
+      assert.ok(objectRequests(state).every((request) => request.query.scope_id === "scope-b"));
+    });
+
+    await scenario("review_setup_edited_scope_root_returns_to_created_identity", `${scopedLocation("literal2026/team/", "ghost-scope")}&key=${encodeURIComponent(trickyKey)}`, {
+      withScope: true, navigation: true, allowScopeCreation: true,
+    }, async (page, { state }) => {
+      await missingScope(page).waitFor();
+      await page.getByRole("link", { name: "Configure scoped access", exact: true }).click();
+      await page.getByLabel("Prefix", { exact: true }).fill("new-root/");
+      await page.getByRole("button", { name: "Add scope", exact: true }).click();
+      await objectsAt(page, "new-root/", "scope-created");
+      const params = await locationParams(page);
+      assert.equal(Object.hasOwn(params, "key"), false, "an exact-key handoff outside the created Scope must be dropped");
+      assert.equal(state.requests.some((request) => request.path.endsWith("/objects/select")), false, "old object selection cannot cross the newly created prefix");
+      assert.ok(objectRequests(state).every((request) => request.query.scope_id === "scope-created" && request.query.prefix === "new-root/"));
+    });
+
+    await scenario("review_setup_different_connection_cannot_fall_back_to_old_scope", scopedLocation("literal2026/team/", "ghost-scope"), {
+      withScope: true, navigation: true, allowScopeCreation: true,
+    }, async (page, { state }) => {
+      await missingScope(page).waitFor();
+      await page.getByRole("link", { name: "Configure scoped access", exact: true }).click();
+      await page.getByRole("combobox", { name: /^Connection/ }).selectOption("s3-b");
+      assert.equal(await page.getByRole("button", { name: "Add scope", exact: true }).isDisabled(), true, "targeted setup must prevent creation against a different S3 connection");
+      await page.waitForLoadState("networkidle");
+      assert.equal(state.requests.some((request) => request.method === "POST" && request.path.endsWith("/scopes")), false);
+      assert.equal(objectRequests(state).length, 0, "a Scope created for a different S3 connection cannot fall back to old manager data");
+      assert.equal(state.requests.some((request) => request.path.endsWith("/objects/select")), false);
+    });
+
+    await scenario("review_setup_mismatching_created_response_stays_in_settings", scopedLocation("literal2026/team/", "ghost-scope"), {
+      withScope: true, navigation: true, allowScopeCreation: true, createdScopeResponse: { connection_id: "s3-b" },
+    }, async (page, { state }) => {
+      await missingScope(page).waitFor();
+      await page.getByRole("link", { name: "Configure scoped access", exact: true }).click();
+      await page.getByRole("button", { name: "Add scope", exact: true }).click();
+      await until(() => state.requests.some((request) => request.method === "POST" && request.path.endsWith("/scopes")), "mismatching creation response");
+      await page.waitForLoadState("networkidle");
+      assert.ok((await page.evaluate(() => location.hash)).startsWith("#settings?"), "a mismatching creation response must keep setup visible");
+      assert.equal(objectRequests(state).length, 0, "mismatching creation response cannot fall back to a covering existing Scope");
+    });
+
+    await scenario("review_setup_browse_using_rebinds_scope_and_preserves_directory", scopedLocation("literal2026/team/", "scope-b", "manager-unlinked"), {
+      withScope: true, navigation: true,
+    }, async (page, { state }) => {
+      await page.getByRole("link", { name: "Configure scoped access", exact: true }).click();
+      const replacement = page.getByRole("link", { name: "Browse using Read-only manager B", exact: true });
+      const params = new URLSearchParams((await replacement.getAttribute("href")).split("?")[1]);
+      assert.equal(params.has("scope"), false, "connection handoff cannot carry a foreign Scope ID");
+      await replacement.click();
+      await objectsAt(page, "literal2026/team/", "scope-other", "manager-b");
+      assert.ok(objectRequests(state).every((request) => request.path.startsWith("/management/manager-b/") && request.query.scope_id === "scope-other"));
+    });
+
+    for (const prefix of ["literal2026/team/", "uncovered/"]) {
+      const first = { ...scopeB, id: "b-first", connection_id: "s3-b", display_name: "First unrelated prefix", prefix: "zzz/" };
+      const startingPrefix = prefix === "uncovered/" ? "literal2026/team/" : prefix;
+      await scenario(`review_manager_switch_${prefix === "uncovered/" ? "uncovered_prefix_uses_root" : "finds_covering_later_scope"}`, scopedLocation(startingPrefix), {
+        withScope: true, navigation: true, prependScopes: [first],
+      }, async (page, { state }) => {
+        await objectsAt(page, startingPrefix);
+        if (prefix === "uncovered/") state.scopes["project-b"] = state.scopes["project-b"].filter((scope) => scope.id !== "scope-other");
+        const before = state.requests.length;
+        await page.locator(".topbar .managementSelector select").selectOption("manager-b");
+        await objectsAt(page, prefix === "uncovered/" ? "zzz/" : startingPrefix, prefix === "uncovered/" ? "b-first" : "scope-other", "manager-b");
+        assert.ok(objectRequests({ requests: state.requests.slice(before) }).every((request) => request.path.startsWith("/management/manager-b/") && request.query.scope_id === (prefix === "uncovered/" ? "b-first" : "scope-other")), "new connection must choose a covering Scope or its approved root");
+        if (prefix === "uncovered/") {
+          const fallbackReads = objectRequests(state).length;
+          await page.evaluate((hash) => { location.hash = hash; }, `objects?${new URLSearchParams({ management: "manager-b", bucket: "bucket-b", prefix: startingPrefix })}`);
+          await missingScope(page).waitFor();
+          await page.waitForLoadState("networkidle");
+          assert.equal(objectRequests(state).length, fallbackReads, "pasting an earlier uncovered URL must not reuse the completed connection-switch fallback");
+        }
+      });
+    }
+
     await scenario("filer_location_survives_sidebar_reload_and_copied_link", fileLocation("/allowed/team/nested"), { navigation: true }, async (page, { state, base }) => {
       await fileAt(page, "/allowed/team/nested");
       const copied = await page.evaluate(() => location.hash);
@@ -247,6 +379,13 @@ async function run() {
         assert.equal(await page.getByRole("table", { name: "Filer directory entries" }).count(), 0);
       });
     }
+
+    await scenario("filer_protected_deep_link_is_blocked_even_with_root_read_grant", fileLocation("/.system/private"), { navigation: true, fileRoots: ["/"] }, async (page, { state }) => {
+      await page.locator(".shell").waitFor();
+      await page.waitForLoadState("networkidle");
+      assert.equal(fileRequests(state).length, 0, "protected Filer metadata cannot dispatch through a broad read root");
+      assert.equal(await page.getByRole("table", { name: "Filer directory entries" }).count(), 0);
+    });
 
     await scenario("object_location_survives_sidebar_reload_and_copied_link", scopedLocation("literal2026//team/"), { withScope: true, navigation: true }, async (page, { state, base }) => {
       await objectsAt(page, "literal2026//team/");

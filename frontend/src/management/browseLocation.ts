@@ -13,7 +13,7 @@ export function readBrowseTarget(hash: string): ObjectBrowseTarget | undefined {
 export function objectBrowseHref(target: ObjectBrowseTarget, setup = false) {
   const params = new URLSearchParams({ management: target.managementId, bucket: target.bucket });
   if (target.key !== undefined) params.set("key", target.key);
-  if (target.scopeId !== undefined) params.set("scope", target.scopeId);
+  if (target.scopeId !== undefined && !setup) params.set("scope", target.scopeId);
   if (target.prefix !== undefined) params.set("prefix", target.prefix);
   if (setup) params.set("setup", "scope");
   return `#${setup ? "settings" : "objects"}?${params.toString()}`;
@@ -50,8 +50,12 @@ export function filerLocation(rawPath: string | undefined, configuredRoots: unkn
   const canonical = canonicalFilerPath(requested);
   const path = canonical ?? requested;
   const root = [...roots].sort((a, b) => b.length - a.length).find((value) => path === value || path.startsWith(value.replace(/\/$/, "") + "/"));
-  const protectedPath = ["/etc", "/topics"].some((value) => path === value || path.startsWith(value + "/"));
+  const protectedPath = protectedFilerPath(path);
   return { path, roots, root, allowed: canonical !== undefined && root !== undefined && !protectedPath };
+}
+
+export function protectedFilerPath(path: string) {
+  return ["/.etc", "/.system", "/etc", "/topics", "/filer-store"].some((value) => path === value || path.startsWith(value + "/"));
 }
 
 export function replaceBrowseHash(hash: string) {

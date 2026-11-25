@@ -1,7 +1,7 @@
 import React, { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ResultSummary, StructuredResult } from "../components/ResultSummary";
 import { t, translateMessage, useLocale } from "../i18n";
-import { directoryAncestors, fileBrowseHref, filerLocation, filerObjectTarget, objectBrowseHref, replaceBrowseHash, type FileBrowseTarget, type ObjectBrowseTarget } from "./browseLocation";
+import { directoryAncestors, fileBrowseHref, filerLocation, filerObjectTarget, objectBrowseHref, protectedFilerPath, replaceBrowseHash, type FileBrowseTarget, type ObjectBrowseTarget } from "./browseLocation";
 
 export type Requester = <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -67,7 +67,7 @@ export function ManagementConnectionSelector({ connections, value, onChange, onR
   );
 }
 
-export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected, projects = [], browseTarget, fileBrowseTarget, onBrowseScope }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void; projects?: { id: string }[]; browseTarget?: ObjectBrowseTarget; fileBrowseTarget?: FileBrowseTarget; onBrowseScope?: (scope: StorageScopeOption) => void }) {
+export function ManagementRoute({ route, request, managementId, connections, s3Connections, refreshConnections, scopes = [], scopeId = "", setScopeId, onObjectSelected, projects = [], browseTarget, fileBrowseTarget, rebindBrowse = false, onBrowseRebound, onBrowseScope }: { route: string; request: Requester; managementId: string; connections: ManagementConnection[]; s3Connections: S3ConnectionOption[]; refreshConnections: () => Promise<void>; scopes?: StorageScopeOption[]; scopeId?: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void; projects?: { id: string }[]; browseTarget?: ObjectBrowseTarget; fileBrowseTarget?: FileBrowseTarget; rebindBrowse?: boolean; onBrowseRebound?: () => void; onBrowseScope?: (scope: StorageScopeOption) => void }) {
   useLocale();
   const connection = connections.find((item) => item.id === managementId);
   if (browseTarget && (!connection || managementId !== browseTarget.managementId)) return <section className="panel"><p className="notice error">{t("The requested management connection is unavailable.")}</p><code>{browseTarget.managementId}</code><a className="buttonLink" href={objectBrowseHref(browseTarget, true)}>{t("Configure scoped access")}</a></section>;
@@ -88,7 +88,7 @@ export function ManagementRoute({ route, request, managementId, connections, s3C
   if (route === "storage") return <StoragePage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "buckets") return <BucketsPage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "files") return <FilesPage key={managementId} request={request} managementId={managementId} connection={connection} browseTarget={fileBrowseTarget} />;
-  if (route === "objects") return <ObjectsPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} projects={projects} browseTarget={browseTarget} onBrowseScope={onBrowseScope} />;
+  if (route === "objects") return <ObjectsPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} onObjectSelected={onObjectSelected} projects={projects} browseTarget={browseTarget} rebindBrowse={rebindBrowse} onBrowseRebound={onBrowseRebound} onBrowseScope={onBrowseScope} />;
   if (route === "iam") return <IamPage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "maintenance") return <MaintenancePage key={managementId} request={request} managementId={managementId} connection={connection} />;
   if (route === "services") return <ServicesPage key={managementId} request={request} managementId={managementId} connection={connection} scopes={scopes} scopeId={scopeId} setScopeId={setScopeId} />;
@@ -447,7 +447,7 @@ function FilesPage({ request, managementId, connection, browseTarget }: { reques
     return full || (path === "/" ? `/${String(item.name || item.Name || "")}` : `${path.replace(/\/$/, "")}/${String(item.name || item.Name || "")}`);
   }
   function protectedFilePath(value: string) {
-    return value === "/etc" || value.startsWith("/etc/") || value === "/topics" || value.startsWith("/topics/");
+    return protectedFilerPath(value);
   }
   async function upload() {
     if (!uploadFile) throw new Error("请选择上传文件。");
@@ -576,7 +576,7 @@ function BrowseBreadcrumbs({ values, hrefFor, onNavigate }: { values: string[]; 
   </nav>;
 }
 
-function ObjectsPage({ request, managementId, connection, scopes, scopeId: currentScopeId, setScopeId, onObjectSelected, projects, browseTarget, onBrowseScope }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void; projects: { id: string }[]; browseTarget?: ObjectBrowseTarget; onBrowseScope?: (scope: StorageScopeOption) => void }) {
+function ObjectsPage({ request, managementId, connection, scopes, scopeId: currentScopeId, setScopeId, onObjectSelected, projects, browseTarget, rebindBrowse = false, onBrowseRebound, onBrowseScope }: { request: Requester; managementId: string; connection?: ManagementConnection; scopes: StorageScopeOption[]; scopeId: string; setScopeId?: (value: string) => void; onObjectSelected?: (objectId: string | null) => void; projects: { id: string }[]; browseTarget?: ObjectBrowseTarget; rebindBrowse?: boolean; onBrowseRebound?: () => void; onBrowseScope?: (scope: StorageScopeOption) => void }) {
   const [accessRefresh, setAccessRefresh] = useState(0);
   const projectIds = JSON.stringify(projects.map((project) => project.id));
   const access = useApi<StorageScopeOption[]>(async () => {
@@ -590,12 +590,14 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId: curre
   const availableScopes = browseTarget ? access.data || [] : scopes;
   const associatedScopes = availableScopes.filter((scope) => connection?.s3_connection_id && scope.connection_id === connection.s3_connection_id);
   const targetScopes = associatedScopes.filter((scope) => !browseTarget || scope.bucket === browseTarget.bucket && (browseTarget.key === undefined || browseTarget.key.startsWith(scope.prefix || "")));
-  const selectedScopeCandidate = browseTarget?.scopeId !== undefined ? targetScopes.find((scope) => scope.id === browseTarget.scopeId) : targetScopes.find((scope) => scope.id === currentScopeId) || (browseTarget ? targetScopes[0] : undefined);
-  const selectedScope = selectedScopeCandidate && (browseTarget?.prefix === undefined || browseTarget.prefix.startsWith(selectedScopeCandidate.prefix || "")) ? selectedScopeCandidate : undefined;
+  const coveringScopes = targetScopes.filter((scope) => browseTarget?.prefix === undefined || browseTarget.prefix.startsWith(scope.prefix || ""));
+  const selectedScope = browseTarget?.scopeId !== undefined
+    ? coveringScopes.find((scope) => scope.id === browseTarget.scopeId)
+    : coveringScopes.find((scope) => scope.id === currentScopeId) || (browseTarget ? coveringScopes[0] : undefined) || (rebindBrowse && browseTarget?.key === undefined ? targetScopes[0] : undefined);
   const scopeId = selectedScope?.id || "";
   const selectedAnyScope = availableScopes.find((scope) => scope.id === currentScopeId);
   const requestedDirectory = browseTarget?.key?.slice(0, browseTarget.key.lastIndexOf("/") + 1);
-  const prefix = browseTarget?.prefix ?? (requestedDirectory?.startsWith(selectedScope?.prefix || "") ? requestedDirectory : selectedScope?.prefix || "");
+  const prefix = browseTarget?.prefix !== undefined && (!selectedScope || browseTarget.prefix.startsWith(selectedScope.prefix || "")) ? browseTarget.prefix : requestedDirectory?.startsWith(selectedScope?.prefix || "") ? requestedDirectory : selectedScope?.prefix || "";
   const [prefixDraft, setPrefixDraft] = useState(prefix);
   const [prefixError, setPrefixError] = useState("");
   function setPrefix(value: string) {
@@ -612,7 +614,8 @@ function ObjectsPage({ request, managementId, connection, scopes, scopeId: curre
   }, [managementId, scopeId, prefix]);
   useEffect(() => {
     if (selectedScope?.bucket) replaceBrowseHash(objectBrowseHref({ managementId, bucket: selectedScope.bucket, scopeId, prefix, ...(browseTarget?.key !== undefined ? { key: browseTarget.key } : {}) }));
-  }, [managementId, scopeId, prefix, browseTarget?.key, browseTarget?.scopeId, browseTarget?.prefix]);
+    if (rebindBrowse && !access.loading) onBrowseRebound?.();
+  }, [managementId, scopeId, prefix, browseTarget?.key, browseTarget?.scopeId, browseTarget?.prefix, rebindBrowse, access.loading]);
   const [delimiter, setDelimiter] = useState("/");
   const [limit, setLimit] = useState("100");
   const cursorContext = JSON.stringify([scopeId, prefix, delimiter, limit]);
@@ -1079,7 +1082,7 @@ function ServicesPage({ request, managementId, connection, scopes = [], scopeId 
   }
   return <section className="managementPage">
     <div className="managementGrid twoColumn">
-      <DataPanel title={t("其他服务 / 依赖状态")} loading={services.loading || modules.loading} error={services.error || modules.error}><DependencyStates data={services.data} modules={modules.data} expanded /></DataPanel>
+      <DataPanel title={t("其他服务 / 依赖状态")} loading={services.loading || modules.loading} error={services.error || modules.error}><DependencyStates data={services.data} modules={modules.data} health={health.data} expanded /></DataPanel>
       <DataPanel title={t("服务健康")} loading={health.loading} error={health.error}><ServiceHealthTable data={health.data} /></DataPanel>
     </div>
     <DataPanel title={t("Mount 客户端")} loading={mountClients.loading} error={mountClients.error}><MountClientsTable data={mountClients.data} /></DataPanel>
@@ -1185,13 +1188,24 @@ function ServiceInventory({ data }: { data: unknown }) {
   return <DataTable caption="Service inventory" columns={["Service", "Reported count", "Source"]} rows={rows.map(([name, count, raw]) => [t(String(name)), displayValue(count), <span className="monoCell" title={JSON.stringify(raw)}>{count == null ? t("未知") : t("source")}</span>])} />;
 }
 
-function DependencyStates({ data, modules, expanded = false }: { data: unknown; modules?: unknown; expanded?: boolean }) {
+function DependencyStates({ data, modules, health, expanded = false }: { data: unknown; modules?: unknown; health?: unknown; expanded?: boolean }) {
   const value = record(data);
   const pluginData = record(record(value.plugin).data);
   const moduleData = record(modules);
   const optional = record(moduleData.optional_services);
   const mountCount = record(value.mount_clients).count ?? value.total_mount_clients;
-  const dependencies = [{ name: "MQ", state: record(value.mq).state || optional.mq || "unknown", value: displayValue(record(value.mq).count) }, { name: "Mount Clients", state: record(value.mount_clients).state || (mountCount !== undefined ? "reported" : optional.mount_clients || "unknown"), value: displayValue(mountCount) }, { name: "Plugin Worker", state: pluginData.configured ? "reported" : "not_configured", value: displayValue(pluginData.worker_count) }, { name: "Filer endpoint", state: "not_checked", value: t("Open Topology for endpoint health.") }, { name: "Master endpoint", state: "not_checked", value: t("Open Topology for endpoint health.") }, { name: "S3 Tables", state: moduleStatus(record(moduleData.s3_tables)), value: t("official module route") }, { name: "Iceberg", state: optional.iceberg || "unknown", value: t("依赖 plugin / table bucket") }, { name: "Lance", state: optional.lance || "unknown", value: t("依赖 worker plugin") }];
+  const healthRows = serviceHealthRows(record(health));
+  function endpoint(role: string) {
+    if (optional[role] === "not_configured") return { state: "not_configured", value: t("Not configured") };
+    const matchingProbes = healthRows.filter((item) => item.role === role);
+    const probe = matchingProbes.length === 1 ? matchingProbes[0] : undefined;
+    if (probe?.status) return { state: serviceHealthState(probe.status), value: t(displayValue(probe.status)) };
+    if (optional[role] === "configured") return { state: "configured", value: t("Endpoint is configured. No health result is available.") };
+    return { state: "not_checked", value: t("Open Topology for endpoint health.") };
+  }
+  const filer = endpoint("filer");
+  const master = endpoint("master");
+  const dependencies = [{ name: "MQ", state: record(value.mq).state || optional.mq || "unknown", value: displayValue(record(value.mq).count) }, { name: "Mount Clients", state: record(value.mount_clients).state || (mountCount !== undefined ? "reported" : optional.mount_clients || "unknown"), value: displayValue(mountCount) }, { name: "Plugin Worker", state: pluginData.configured ? "reported" : "not_configured", value: displayValue(pluginData.worker_count) }, { name: "Filer endpoint", state: filer.state, value: filer.value }, { name: "Master endpoint", state: master.state, value: master.value }, { name: "S3 Tables", state: moduleStatus(record(moduleData.s3_tables)), value: t("official module route") }, { name: "Iceberg", state: optional.iceberg || "unknown", value: t("依赖 plugin / table bucket") }, { name: "Lance", state: optional.lance || "unknown", value: t("依赖 worker plugin") }];
   return <div className={expanded ? "dependencyGrid expanded" : "dependencyGrid"}>{dependencies.map((item) => <StateRow key={item.name} label={item.name} value={item.value} state={String(item.state)} />)}</div>;
 }
 

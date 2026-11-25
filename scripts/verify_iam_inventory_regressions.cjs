@@ -12,6 +12,7 @@ const reads = {};
 let revision = 0;
 let accessKeyReceipts = 0;
 let latestDeleteMarker = false;
+let endpointEvidence = 'healthy';
 const createdCredentials = {access_key:'SYNTHETIC-ONCE-PUBLIC',secret_key:'synthetic-once-secret'};
 const serviceAccountId = `sa:alice:${'long-identity-'.repeat(24)}`;
 const journal = [
@@ -46,7 +47,8 @@ const server = http.createServer(async(req,res)=>{
     if(p.endsWith('/scopes'))return json(res,{items:[scope]});
     if(p==='/api/v1/management/m/buckets')return json(res,{items:[{name:'versioning-off',versioning_status:''},{name:'versioning-missing'},{name:'versioning-null',versioning_status:null},{name:'versioning-enabled',versioning_status:'Enabled'},{name:'versioning-suspended',versioning_status:'Suspended'}]});
     if(p==='/api/v1/management/m/operations')return json(res,{items:journal});
-    if(p==='/api/v1/management/m/services/health')return json(res,{services:{filer:{status:'healthy',endpoint:'synthetic-filer',source:'mock'},master:{status:'healthy',endpoint:'synthetic-master',source:'mock'}}});
+    if(p==='/api/v1/management/m/modules')return json(res,{optional_services:{filer:endpointEvidence==='not_configured'?'not_configured':'configured',master:endpointEvidence==='not_configured'?'not_configured':'configured'}});
+    if(p==='/api/v1/management/m/services/health')return json(res,endpointEvidence==='configured'?{}:endpointEvidence==='ambiguous'?{items:[{role:'filer',status:'healthy',endpoint:'synthetic-filer-a',source:'mock'},{role:'filer',status:'unreachable',endpoint:'synthetic-filer-b',source:'mock'}]}:{services:{filer:{status:endpointEvidence,endpoint:'synthetic-filer',source:'mock'},master:{status:endpointEvidence,endpoint:'synthetic-master',source:'mock'}}});
     if(p==='/api/v1/scopes/s/assets')return json(res,{items:[asset],next_cursor:null});
     if(p==='/api/v1/scopes/s/assets/version-asset')return json(res,{asset,objects:[asset],references:[]});
     if(p==='/api/v1/scopes/s/objects/version-object/versions')return json(res,{versions:[{version_id:'current-data',is_latest:!latestDeleteMarker,size:12},{version_id:'older-data',is_latest:false,size:11},{version_id:'delete-marker',is_delete_marker:true,is_latest:latestDeleteMarker}]});
@@ -162,6 +164,24 @@ const server = http.createServer(async(req,res)=>{
    assert.equal(await health.locator('tbody tr').count(),2,'Topology must show the actual probe results');
    for(const endpoint of ['synthetic-filer','synthetic-master'])assert.ok((await health.locator('tbody tr').filter({hasText:endpoint}).locator('td').nth(2).innerText()).toLowerCase().includes(locale==='en'?'healthy':'健康'));
    statusCases.push(`${locale}: Dashboard labels unchecked endpoints while Topology displays healthy probe evidence`);
+
+   for(const evidence of ['not_configured','configured','healthy','ambiguous']) {
+     endpointEvidence=evidence;
+     await page.goto(base+'/#services');
+     for(const name of locale==='en'?['Filer endpoint','Master endpoint']:['Filer 端点','Master 端点']) {
+       const dependency=page.locator('.dependencyGrid .stateRow').filter({has:page.locator('strong').filter({hasText:name})});
+       await dependency.waitFor();
+       const expected=evidence==='not_configured'?(locale==='en'?'Not configured':'未配置'):evidence==='healthy'?(locale==='en'?'Healthy':'健康'):(locale==='en'?'Endpoint is configured. No health result is available.':'已配置，暂无健康检查结果。');
+       await until(async()=>(await dependency.innerText()).includes(expected)).catch(async()=>{
+         throw new Error(`${locale} ${name} (${evidence}) expected ${JSON.stringify(expected)}, received ${JSON.stringify(await dependency.innerText())}`);
+       });
+       const expectedBadge=evidence==='not_configured'?(locale==='en'?'Not configured':'未配置'):evidence==='healthy'?(locale==='en'?'Official report':'官方报告'):(locale==='en'?'Configured':'已配置');
+       assert.equal(await dependency.locator('.pill').innerText(),expectedBadge);
+     }
+     await page.goto(base+'/#dashboard');
+   }
+   endpointEvidence='healthy';
+   statusCases.push(`${locale}: Services distinguishes unconfigured, configured and observed healthy endpoints`);
 
    await page.goto(base+'/#iam');
    const serviceTable=page.locator('table').filter({hasText:serviceAccountId});

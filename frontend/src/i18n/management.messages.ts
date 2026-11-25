@@ -1,6 +1,7 @@
 export const managementMessages: Record<string, { en: string; "zh-CN": string }> = {
   "Off": { en: "Off", "zh-CN": "关闭" },
   "Not checked": { en: "Not checked", "zh-CN": "未检查" },
+  "Endpoint is configured. No health result is available.": { en: "Endpoint is configured. No health result is available.", "zh-CN": "已配置，暂无健康检查结果。" },
   "Open Topology for endpoint health.": { en: "Open Topology for endpoint health.", "zh-CN": "请在拓扑页面查看端点健康检查。" },
   "Method": { en: "Method", "zh-CN": "方法" },
   "Path": { en: "Path", "zh-CN": "路径" },
@@ -649,4 +650,5 @@ export const managementMessages: Record<string, { en: string; "zh-CN": string }>
   "Go": { en: "Go", "zh-CN": "前往" },
   "Read root": { en: "Read root", "zh-CN": "可读根目录" },
   "Location is outside the permitted root.": { en: "Location is outside the permitted root.", "zh-CN": "位置超出授权根目录。" },
+  "The created scope cannot be bound to the requested management connection.": { en: "The created scope cannot be bound to the requested management connection.", "zh-CN": "新建范围无法绑定到所请求的管理连接。" },
 };
