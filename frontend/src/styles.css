@@ -951,6 +951,21 @@ dd {
   border-radius: var(--radius-lg);
 }
 
+.managementPage .scrollableTable {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.managementPage .scrollableTable table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.managementPage .scrollableTable th,
+.managementPage .scrollableTable td {
+  white-space: nowrap;
+}
+
 .managementPage .compactTable table {
   min-width: 0;
 }
@@ -1487,4 +1502,10 @@ pre {
 }
 
 .sparkline { width: 100%; max-width: 180px; height: 32px; color: #2563eb; margin-top: 6px; }
+
+.browseBreadcrumbs a {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 

@@ -105,6 +105,7 @@
 - An explicit bucket request resolves Scopes across accessible projects using the linked S3 connection and exact bucket. A requested object additionally requires a matching literal key prefix.
 - Missing linkage, Scope discovery in progress, discovery failure, missing scoped access, and an observed empty listing each have distinct UI states. The setup handoff retains the requested bucket and connection and returns after explicit Scope creation.
 - Filer S3 files open the scoped object browser with their exact keys. Rename preparation has its own label. Original-download permission controls download availability, and read-only management connections support browsing.
+- Directory navigation records the connection and committed location in the URL. Live Objects also records the selected Scope. Up and breadcrumb links stop at the approved Filer read root or the literal S3 Scope prefix. Sidebar return, refresh and browser history should resolve the same directory.
 - Browser locations carry identifiers and literal object keys. Each backend request enforces authorization. Scope resolution and object results are invalidated when their connection or requested target changes.
 
 ## Design principles

@@ -5,7 +5,7 @@ import { t, translateMessage, useLocale } from "./i18n";
 import { LanguageSelector } from "./i18n/LanguageSelector";
 import { ResultSummary, StructuredResult as ApiStructuredResult } from "./components/ResultSummary";
 import { ManagementConnectionSelector, ManagementRoute, ManagementSettings, isManagementRoute, managementTitle, type ManagementConnection, type StorageScopeOption } from "./management/ManagementViews";
-import { objectBrowseHref, readBrowseTarget } from "./management/browseLocation";
+import { fileBrowseHref, filerLocation, objectBrowseHref, readBrowseTarget, readFileBrowseTarget } from "./management/browseLocation";
 
 type Requester = <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
 type Project = { id: string; project_key?: string; display_name: string; description?: string; scopes?: Scope[] };
@@ -111,6 +111,9 @@ function App() {
   const [routeHash, setRouteHash] = useState(location.hash);
   const route = routeHash.replace(/^#/, "").split("?")[0] || "dashboard";
   const browseTarget = readBrowseTarget(routeHash);
+  const fileBrowseTarget = readFileBrowseTarget(routeHash);
+  const requestedManagementId = fileBrowseTarget?.managementId ?? browseTarget?.managementId;
+  const [browseLocations, setBrowseLocations] = useState<Record<string, string>>({});
   const [deriveObjectIds, setDeriveObjectIds] = useState<string[]>([]);
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
   const [operationTab, setOperationTab] = useState("copy");
@@ -158,6 +161,7 @@ function App() {
     setDeriveObjectIds([]);
     setSelectedObjectIds([]);
     setOperationTab("copy");
+    setBrowseLocations({});
     if (message) setError(message);
   }
 
@@ -289,8 +293,8 @@ function App() {
       const result = await request<{ items: ManagementConnection[] }>("/management/connections");
       const items = result.items || [];
       setManagementConnections(items);
-      const requested = readBrowseTarget(location.hash)?.managementId;
-      setManagementId((current) => requested ? items.find((item) => item.id === requested)?.id || "" : current && items.some((item) => item.id === current) ? current : items[0]?.id || "");
+      const requested = readFileBrowseTarget(location.hash)?.managementId ?? readBrowseTarget(location.hash)?.managementId;
+      setManagementId((current) => requested !== undefined ? items.find((item) => item.id === requested)?.id || "" : current && items.some((item) => item.id === current) ? current : items[0]?.id || "");
     } catch (err) {
       if (isSessionExpiredMessage(err)) return;
       if (isStaleAuthMessage(err)) return;
@@ -309,8 +313,19 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (browseTarget && !managementLoading) setManagementId(managementConnections.find((item) => item.id === browseTarget.managementId)?.id || "");
+    if (requestedManagementId !== undefined && !managementLoading) setManagementId(managementConnections.find((item) => item.id === requestedManagementId)?.id || "");
   }, [routeHash, managementConnections, managementLoading]);
+
+  useEffect(() => {
+    const requestedConnection = managementConnections.find((item) => item.id === requestedManagementId);
+    const fileLocation = filerLocation(fileBrowseTarget?.path, requestedConnection?.permissions?.["file.read_roots"]);
+    if (route === "files" && fileBrowseTarget && fileLocation.allowed && requestedConnection) {
+      setBrowseLocations((current) => ({ ...current, files: fileBrowseHref({ managementId: fileBrowseTarget.managementId, path: fileLocation.path }) }));
+    }
+    if (route === "objects" && browseTarget?.scopeId !== undefined && browseTarget.prefix !== undefined && requestedConnection && scopes.some((scope) => scope.id === browseTarget.scopeId && scope.bucket === browseTarget.bucket && scope.connection_id === requestedConnection.s3_connection_id && browseTarget.prefix!.startsWith(scope.prefix || "") && (browseTarget.key === undefined || browseTarget.key.startsWith(scope.prefix || "")))) {
+      setBrowseLocations((current) => ({ ...current, objects: objectBrowseHref(browseTarget) }));
+    }
+  }, [routeHash, managementConnections, scopes]);
 
   useEffect(() => {
     refresh({ bootstrap: true }).catch((err) => {
@@ -366,7 +381,7 @@ function App() {
             ["maintenance", "wrench", "Worker 维护"],
             ["services", "plug", "其他服务"]
           ].map(([id, icon, label]) => (
-            <a key={id} href={`#${id}`} className={route === id ? "active" : ""}><Icon name={icon} />{t(label)}</a>
+            <a key={id} href={browseLocations[id] || `#${id}`} className={route === id ? "active" : ""}><Icon name={icon} />{t(label)}</a>
           ))}
           <span className="navGroupLabel">{t("图片增强")}</span>
           {[
@@ -394,7 +409,13 @@ function App() {
             <ManagementConnectionSelector
               connections={managementConnections}
               value={managementId}
-              onChange={(id) => { setManagementId(id); if (browseTarget && route === "objects") location.hash = objectBrowseHref({ ...browseTarget, managementId: id }); }}
+              onChange={(id) => {
+                setManagementId(id);
+                if (route === "files") {
+                  const roots = managementConnections.find((item) => item.id === id)?.permissions?.["file.read_roots"];
+                  location.hash = fileBrowseHref({ managementId: id, path: filerLocation(undefined, roots).path });
+                } else if (browseTarget && route === "objects") location.hash = objectBrowseHref({ ...browseTarget, managementId: id, scopeId: undefined });
+              }}
               onRefresh={() => refreshManagementConnections().catch((err) => setError(String(err.message || err)))}
               compact
             />
@@ -417,7 +438,7 @@ function App() {
           </div>}
         </header>
         {error && <div className="notice error">{translateMessage(error)}<button onClick={() => setError("")}>×</button></div>}
-        {managementRoute && (managementLoading || Boolean(browseTarget && managementId !== browseTarget.managementId && managementConnections.some((item) => item.id === browseTarget.managementId)) ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={selectScope} projects={projects} browseTarget={browseTarget} onBrowseScope={(selected) => { if (selected.project_id) selectProject(selected.project_id); selectScope(selected.id); }} onObjectSelected={(objectId) => { setSelectedObjectIds(objectId ? [objectId] : []); if (objectId) setOperationTab("object"); }} />)}
+        {managementRoute && (managementLoading || Boolean(requestedManagementId && managementId !== requestedManagementId && managementConnections.some((item) => item.id === requestedManagementId)) ? <div className="panel" role="status">{t("正在读取管理连接…")}</div> : <ManagementRoute route={route} request={request} managementId={managementId} connections={managementConnections} s3Connections={connections} refreshConnections={refreshManagementConnections} scopes={scopes as StorageScopeOption[]} scopeId={scopeId} setScopeId={selectScope} projects={projects} browseTarget={browseTarget} fileBrowseTarget={fileBrowseTarget} onBrowseScope={(selected) => { if (selected.project_id) selectProject(selected.project_id); selectScope(selected.id); }} onObjectSelected={(objectId) => { setSelectedObjectIds(objectId ? [objectId] : []); if (objectId) setOperationTab("object"); }} />)}
         {route === "assets" && <Assets request={request} scopeId={scopeId} projectId={projectId} onSelectionChange={setSelectedObjectIds} sendToOperationsCopy={(ids) => { setSelectedObjectIds(ids); setOperationTab("copy"); location.hash = "operations"; }} sendToPresets={(ids) => { setDeriveObjectIds(ids); location.hash = "presets"; }} />}
         {route === "scans" && <Scans request={request} scopeId={scopeId} onChanged={() => refreshScopes(projectId)} />}
         {route === "diagnostics" && <Diagnostics request={request} scopeId={scopeId} />}
@@ -780,10 +801,11 @@ function Detail({ request, asset, scopeId, close }: { request: Requester; asset:
       <DataTable columns={[t("Version ID"), t("状态"), t("大小"), t("修改时间"), t("动作")]} rows={versions.map((version) => {
         if (version.error) return [<code>{t("error")}</code>, t("unknown"), t("unknown"), t("unknown"), String(version.error)];
         const rawVersionId = String(version.version_id ?? version.VersionId ?? "null");
-        const isDeleteMarker = Boolean(version.is_delete_marker ?? version.IsDeleteMarker ?? version.delete_marker);
+        const isDeleteMarker = Boolean(version.is_delete_marker ?? version.IsDeleteMarker ?? version.delete_marker ?? version.DeleteMarker);
+        const isLatest = (version.is_latest ?? version.IsLatest) === true;
         return [
           <code>{rawVersionId}</code>,
-          isDeleteMarker ? t("DeleteMarker") : String(version.is_latest ?? version.IsLatest ? t("latest") : version.state || t("version")),
+          isDeleteMarker ? [t("DeleteMarker"), ...(isLatest ? [t("latest")] : [])].join(" · ") : String(isLatest ? t("latest") : version.state || t("version")),
           String(version.size ?? version.Size ?? "unknown"),
           String(version.last_modified ?? version.LastModified ?? "unknown"),
           <span className="actions">

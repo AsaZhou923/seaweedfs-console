@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 from . import db
 from .security import AppError, utc_now
@@ -222,14 +223,65 @@ def perform_operation(settings, management, actor_id, action, method, path, payl
 def list_operations(settings, management_id, limit=100):
     limit = min(200, max(1, limit))
     with db.connect(settings) as conn:
-        rows = conn.execute("SELECT id,actor_id,action,state,error_code,created_at,updated_at FROM management_operations WHERE management_id=? ORDER BY created_at DESC LIMIT ?",
+        rows = conn.execute("SELECT id,actor_id,action,method,path,request_json,state,error_code,created_at,updated_at FROM management_operations WHERE management_id=? ORDER BY created_at DESC,id DESC LIMIT ?",
                             (management_id, limit)).fetchall()
-        items = [dict(row) for row in rows]
+        items = []
+        for row in rows:
+            item = dict(row)
+            try:
+                payload = json.loads(item.pop("request_json"))
+            except (TypeError, ValueError):
+                payload = {}
+            method = item["method"].upper() if isinstance(item["method"], str) else None
+            item["method"] = method if method in {"POST", "PUT", "PATCH", "DELETE"} else None
+            item["path"] = _history_path(item["path"])
+            item["target"] = _history_target(payload, item["path"])
+            items.append(item)
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='management_condition_probes'").fetchone():
-            probes = conn.execute("SELECT id,actor_id,'object.condition.probe' AS action,state,error_code,created_at,updated_at FROM management_condition_probes WHERE management_id=? ORDER BY created_at DESC LIMIT ?",
+            probes = conn.execute("SELECT id,actor_id,'object.condition.probe' AS action,scope_id,probe_key,state,error_code,created_at,updated_at FROM management_condition_probes WHERE management_id=? ORDER BY created_at DESC,id DESC LIMIT ?",
                                   (management_id, limit)).fetchall()
-            items.extend(dict(row) for row in probes)
+            for row in probes:
+                item = dict(row)
+                item.update(method="POST", path="/objects/check-conditional-delete",
+                            target=_history_target({"scope_id": item.pop("scope_id"), "key": item.pop("probe_key")}, None))
+                items.append(item)
     return {"items": sorted(items, key=lambda item: (item["created_at"], item["id"]), reverse=True)[:limit]}
+
+
+def _history_text(value):
+    if not isinstance(value, str) or not value:
+        return None
+    # Inspect encoded historical values as well as ordinary strings. No request
+    # bodies, session identifiers or URL credentials belong in the history DTO.
+    decoded = unquote(unquote(value))
+    if "://" in decoded or re.search(r"(?i)(?:password|secret|token|session|authorization|cookie|signature|credential)[\w-]*\s*=", decoded):
+        return "[REDACTED]"
+    return "".join(character for character in value if character.isprintable())[:600]
+
+
+def _history_path(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        path = urlsplit(value).path
+    except ValueError:
+        return None
+    path = re.sub(r"(?i)(/(?:sessions?|tokens?)/)[^/]+", r"\1[REDACTED]", path)
+    return _history_text(path) if path.startswith("/") else None
+
+
+def _history_target(payload, path):
+    # Identity only. In particular, omit policy/config documents, arbitrary
+    # metadata, hashes, credentials, request keys, and returned receipts.
+    fields = ("scope_id", "bucket", "bucket_arn", "resource_arn", "namespace", "name", "username", "parent_user",
+              "key", "version_id", "path", "source_path", "target_path", "folder_name", "filename", "volume_id")
+    parts = []
+    if isinstance(payload, dict):
+        for field in fields:
+            value = _history_text(payload.get(field))
+            if value is not None:
+                parts.append(f"{field}={value}")
+    return ", ".join(parts)[:1000] if parts else path
 
 
 def _credential_receipt(value):

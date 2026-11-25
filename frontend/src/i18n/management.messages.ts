@@ -1,4 +1,10 @@
 export const managementMessages: Record<string, { en: string; "zh-CN": string }> = {
+  "Off": { en: "Off", "zh-CN": "关闭" },
+  "Not checked": { en: "Not checked", "zh-CN": "未检查" },
+  "Open Topology for endpoint health.": { en: "Open Topology for endpoint health.", "zh-CN": "请在拓扑页面查看端点健康检查。" },
+  "Method": { en: "Method", "zh-CN": "方法" },
+  "Path": { en: "Path", "zh-CN": "路径" },
+  "Target": { en: "Target", "zh-CN": "目标" },
   "Exact object identity is unavailable. Refresh the file listing before opening this object.": { en: "Exact object identity is unavailable. Refresh the file listing before opening this object.", "zh-CN": "无法确定精确对象标识。请刷新文件列表后再打开此对象。" },
   "Refresh listing": { en: "Refresh listing", "zh-CN": "刷新文件列表" },
   "Create or select a management connection linked to the S3 service for this bucket.": { en: "Create or select a management connection linked to the S3 service for this bucket.", "zh-CN": "请创建或选择已关联此桶所属 S3 服务的管理连接。" },
@@ -638,4 +644,9 @@ export const managementMessages: Record<string, { en: string; "zh-CN": string }>
   "Filer Files": { en: "Filer Files", "zh-CN": "Filer 文件" },
   "Live Objects": { en: "Live Objects", "zh-CN": "实时对象" },
   "The storage service cannot verify Legal Hold or retention for this null version. Deletion is blocked even when conditional deletion is supported.": { en: "The storage service cannot verify Legal Hold or retention for this null version. Deletion is blocked even when conditional deletion is supported.", "zh-CN": "存储服务无法核实此 null 版本的 Legal Hold 或保留状态。即使支持条件删除，此版本仍禁止删除。" },
+  "Location breadcrumbs": { en: "Location breadcrumbs", "zh-CN": "位置导航" },
+  "Up": { en: "Up", "zh-CN": "上一级" },
+  "Go": { en: "Go", "zh-CN": "前往" },
+  "Read root": { en: "Read root", "zh-CN": "可读根目录" },
+  "Location is outside the permitted root.": { en: "Location is outside the permitted root.", "zh-CN": "位置超出授权根目录。" },
 };

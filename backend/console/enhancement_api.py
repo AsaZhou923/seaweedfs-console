@@ -302,6 +302,7 @@ def _identity(bucket: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
         "last_modified": modified,
         "content_type": data.get("ContentType") or data.get("content_type"),
         "metadata": data.get("Metadata") or data.get("metadata") or {},
+        "is_latest": data.get("IsLatest") if isinstance(data.get("IsLatest"), bool) else None,
         "is_delete_marker": bool(data.get("IsLatest") is False and data.get("DeleteMarker")),
     }
 
