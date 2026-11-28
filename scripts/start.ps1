@@ -197,7 +197,7 @@ function Stop-TaskStartupProcesses {
 
 $taskStartedProcesses = @()
 try {
-    $taskApi = Start-Process -FilePath $taskPython -ArgumentList @('-m','uvicorn','console.main:create_app','--factory','--host','127.0.0.1','--port',"$Port") -WorkingDirectory (Join-Path $taskRoot 'backend') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskOutput 'api.log') -RedirectStandardError (Join-Path $taskOutput 'api-error.log')
+    $taskApi = Start-Process -FilePath $taskPython -ArgumentList @('-m','uvicorn','console.main:create_app','--factory','--no-proxy-headers','--host','127.0.0.1','--port',"$Port") -WorkingDirectory (Join-Path $taskRoot 'backend') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskOutput 'api.log') -RedirectStandardError (Join-Path $taskOutput 'api-error.log')
     $taskApiRecord = New-TaskProcessRecord -TaskProcess $taskApi -TaskPythonPath $taskPython
     $taskStartedProcesses += $taskApiRecord
     Add-TaskProcessMetadata -TaskRecord $taskApiRecord | Out-Null

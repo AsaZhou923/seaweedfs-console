@@ -11,6 +11,10 @@ from fastapi import APIRouter, Request
 
 router = APIRouter(prefix="/api/v1")
 HANDLERS: dict = {}
+PUBLIC_JOB_FIELDS = (
+    "id", "scope_id", "kind", "state", "processed", "errors", "attempt_count", "max_attempts",
+    "pause_requested_at", "cancel_requested_at", "error_code", "created_at", "updated_at",
+)
 
 
 def now() -> str:
@@ -32,6 +36,15 @@ def initialize(conn):
       UNIQUE(namespace,idempotency_key));
     CREATE UNIQUE INDEX IF NOT EXISTS active_scan ON jobs(scope_id)
       WHERE kind='scan' AND state IN ('queued','running','paused');
+    CREATE TABLE IF NOT EXISTS scan_listing_pages (
+      job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+      page_json TEXT NOT NULL);
+    CREATE TRIGGER IF NOT EXISTS release_scan_listing_page
+      AFTER UPDATE OF state ON jobs
+      WHEN NEW.kind='scan' AND NEW.state IN ('succeeded','partially_failed','failed','cancelled','needs_review')
+      BEGIN
+        DELETE FROM scan_listing_pages WHERE job_id=NEW.id;
+      END;
     CREATE TABLE IF NOT EXISTS job_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL REFERENCES jobs(id),
       object_id TEXT,state TEXT NOT NULL,error_code TEXT,result_json TEXT NOT NULL DEFAULT '{}',
@@ -68,9 +81,7 @@ def submit_job(conn, scope_id: str, kind: str, params: dict, actor: str = "admin
 
 def public(job: dict) -> dict:
     # Continuation tokens, credentials and decoder paths stay server-side.
-    return {key: job[key] for key in ("id", "scope_id", "kind", "state", "processed", "errors",
-            "attempt_count", "max_attempts", "pause_requested_at", "cancel_requested_at",
-            "error_code", "created_at", "updated_at")} | {
+    return {key: job[key] for key in PUBLIC_JOB_FIELDS} | {
         "control_request": "cancel" if job["cancel_requested_at"] else "pause" if job["pause_requested_at"] else "none",
         "total": None}
 
@@ -186,21 +197,16 @@ def list_jobs(request: Request, scope_id: str | None = None):
     from .security import current_user
     current_user(request)
     with db.connect(request.app.state.settings) as conn:
+        # Scope read access for the local administrator requires an active Scope.
+        columns = ", ".join(f"j.{field}" for field in PUBLIC_JOB_FIELDS)
+        query = f"SELECT {columns} FROM jobs j JOIN scopes s ON s.id=j.scope_id WHERE s.is_active=1"
+        bindings = ()
         if scope_id:
-            core.require_scope(request, scope_id)
-            rows = conn.execute("SELECT * FROM jobs WHERE scope_id=? ORDER BY created_at DESC, id DESC LIMIT 200", (scope_id,)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT 200").fetchall()
-        visible = []
-        for row in rows:
-            if scope_id and scope_id != row["scope_id"]:
-                continue
-            try:
-                core.require_scope(request, row["scope_id"])
-            except Exception:
-                continue
-            visible.append(public(dict(row)))
-        return {"items": visible}
+            core.ensure_scope_permission(conn, scope_id, "object:read")
+            query += " AND j.scope_id=?"
+            bindings = (scope_id,)
+        rows = conn.execute(query + " ORDER BY j.created_at DESC, j.id DESC LIMIT 200", bindings)
+        return {"items": [public(dict(row)) for row in rows]}
 
 
 @router.get("/jobs/{job_id}")

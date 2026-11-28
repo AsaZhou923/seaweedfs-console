@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -260,6 +264,398 @@ def create_connection_body(client: TestClient, csrf: str, body: dict) -> TestCli
         json=body,
         headers={"Origin": "http://testserver", "X-CSRF-Token": csrf},
     )
+
+
+class SessionAdminMock(AdminMock):
+    def __init__(self):
+        super().__init__()
+        self.session_requests = []
+        self.sessions = {}
+        self.handshakes = 0
+        self.password = "admin-pass"
+        self.expired_response = 401
+        self.login_delay = 0.0
+        self.reject_writes = False
+
+    def __call__(self, request):
+        self.session_requests.append(request)
+        prefix = "/proxy" if request.url.path.startswith("/proxy/") else ""
+        path = request.url.path.removeprefix(prefix)
+        identity = request.url.host + prefix
+        if path == "/login" and request.method == "GET":
+            return httpx.Response(200, text='<input type="hidden" name="csrf_token" value="login-csrf">', headers={"content-type": "text/html"})
+        if path == "/login" and request.method == "POST":
+            assert parse_qs(request.content.decode())["password"] == [self.password]
+            time.sleep(self.login_delay)
+            self.handshakes += 1
+            token = f"session-{self.handshakes}"
+            self.sessions[token] = identity
+            return httpx.Response(303, headers={"location": prefix + "/admin", "set-cookie": f"sid={token}; Path={prefix or '/'}"})
+        if path == "/admin":
+            return httpx.Response(200, text='<meta name="csrf-token" content="read-csrf">', headers={"content-type": "text/html"})
+        if path.startswith("/api/"):
+            if request.method != "GET" and self.reject_writes:
+                return httpx.Response(401, json={"error": "expired"})
+            token = request.headers.get("cookie", "").removeprefix("sid=")
+            if self.sessions.get(token) != identity:
+                return httpx.Response(self.expired_response, json={"error": "expired"}, headers={"location": prefix + "/login"})
+        return super().__call__(request)
+
+
+@pytest.fixture()
+def read_sessions(api, monkeypatch):
+    client, settings, csrf, _admin = api
+    admin = SessionAdminMock()
+    monkeypatch.setattr(management, "_TEST_TRANSPORT", admin.transport())
+    monkeypatch.setattr(management, "_ADMIN_READ_SESSIONS", OrderedDict())
+    return client, settings, csrf, admin
+
+
+def test_projection_reads_share_one_handshake_including_dashboard_volumes(read_sessions):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    for route in ("overview", "services", "volumes?limit=6", "overview", "volumes?limit=6"):
+        response = client.get(f"/api/v1/management/{connection['id']}/{route}")
+        assert response.status_code == 200, response.text
+        assert "abc" not in response.text
+    assert admin.handshakes == 1
+    assert sum(request.url.path == "/login" for request in admin.session_requests) == 2
+    assert sum(request.url.path == "/admin" for request in admin.session_requests) == 1
+    assert sum(request.url.path == "/api/volumes/export" for request in admin.session_requests) == 2
+
+
+def test_projection_session_revalidates_credential_rotation_and_approval(read_sessions):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    url = f"/api/v1/management/{connection['id']}/overview"
+    assert client.get(url).status_code == 200
+    registry = json.loads(settings.secrets_file.read_text(encoding="utf-8"))
+    registry["server-admin"]["password"] = admin.password = "rotated-admin-pass"
+    settings.secrets_file.write_text(json.dumps(registry), encoding="utf-8")
+    assert client.get(url).status_code == 200
+    assert admin.handshakes == 2
+    before = len(admin.session_requests)
+    registry["server-admin"]["allowed_endpoint_url"] = "http://other.local:23646"
+    settings.secrets_file.write_text(json.dumps(registry), encoding="utf-8")
+    response = client.get(url)
+    assert response.status_code == 403 and response.json()["error"]["code"] == "ADMIN_ENDPOINT_DENIED"
+    assert len(admin.session_requests) == before
+    registry.pop("server-admin")
+    settings.secrets_file.write_text(json.dumps(registry), encoding="utf-8")
+    assert client.get(url).status_code == 403
+    assert len(admin.session_requests) == before
+
+
+def test_unsupported_projection_keeps_authenticated_session_without_retries(read_sessions):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    admin.mode = "unsupported"
+    for _ in range(2):
+        response = client.get(f"/api/v1/management/{connection['id']}/overview")
+        assert response.status_code == 200, response.text
+        assert response.json()["modules"] == {"admin": "unsupported", "config": "unsupported"}
+    assert admin.handshakes == 1
+    assert sum(request.url.path == "/api/admin" for request in admin.session_requests) == 2
+
+
+def test_forbidden_projection_retains_session_without_login_or_read_retries(read_sessions):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    url = f"/api/v1/management/{connection['id']}/overview"
+    assert client.get(url).status_code == 200
+    admin.mode = "forbidden"
+    for _ in range(2):
+        response = client.get(url)
+        assert response.status_code == 200, response.text
+        assert response.json()["modules"] == {"admin": "permission_denied", "config": "permission_denied"}
+    assert admin.handshakes == 1
+    assert sum(request.url.path == "/api/admin" for request in admin.session_requests) == 3
+    assert sum(request.url.path == "/api/config" for request in admin.session_requests) == 3
+    admin.mode = "ok"
+    assert client.get(url).json()["admin"]["username"] == "admin"
+    assert admin.handshakes == 1
+
+
+def test_projection_waiting_for_session_lock_honors_request_deadline(read_sessions):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    assert client.get(f"/api/v1/management/{connection['id']}/overview").status_code == 200
+    entry = next(iter(management._ADMIN_READ_SESSIONS.values()))
+    before = len(admin.session_requests)
+
+    def read():
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                upstream._deadline_monotonic = time.monotonic() + .1
+                return upstream.get_json("/api/admin")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        entry.lock.acquire()
+        try:
+            future = pool.submit(read)
+            with pytest.raises(AppError) as caught:
+                future.result(timeout=2)
+            assert caught.value.code == "ADMIN_TIMEOUT" and caught.value.status == 504
+        finally:
+            entry.lock.release()
+    assert len(admin.session_requests) == before
+
+
+def test_normal_volume_read_times_out_behind_cold_login_without_dispatch(read_sessions, monkeypatch):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    entered, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(management, "_ADMIN_REQUEST_TIMEOUT", .05)
+
+    def held_login(request):
+        if request.method == "GET" and request.url.path == "/login":
+            entered.set()
+            assert release.wait(5), "cold login was not released"
+        return admin(request)
+
+    monkeypatch.setattr(management, "_TEST_TRANSPORT", httpx.MockTransport(held_login))
+    url = f"/api/v1/management/{connection['id']}/volumes?limit=6"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        leader = pool.submit(client.get, url)
+        try:
+            assert entered.wait(2)
+            follower = pool.submit(client.get, url).result(timeout=2)
+            assert follower.status_code == 200, follower.text
+            assert follower.json()["module_status"] == "unreachable"
+            assert follower.json()["evidence"]["error_code"] == "ADMIN_TIMEOUT"
+            assert admin.session_requests == [], "waiting follower dispatched a remote call"
+        finally:
+            release.set()
+        assert leader.result(timeout=2).status_code == 200
+    assert admin.handshakes == 1
+    assert sum(request.url.path == "/api/volumes/export" for request in admin.session_requests) == 1
+
+
+def test_successful_read_returns_while_session_refresh_holds_cookie_lock(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    armed = threading.Event()
+    read_entered, read_release = threading.Event(), threading.Event()
+    login_entered, login_release = threading.Event(), threading.Event()
+
+    def transport(request):
+        if armed.is_set():
+            if request.url.path == "/api/admin" and not read_entered.is_set():
+                read_entered.set()
+                assert read_release.wait(5)
+            if request.url.path == "/login" and request.method == "GET":
+                login_entered.set()
+                assert login_release.wait(5)
+        return admin(request)
+
+    monkeypatch.setattr(management, "_TEST_TRANSPORT", httpx.MockTransport(transport))
+    assert client.get(f"/api/v1/management/{connection['id']}/overview").status_code == 200
+    entry = next(iter(management._ADMIN_READ_SESSIONS.values()))
+    monkeypatch.setattr(management, "_ADMIN_REQUEST_TIMEOUT", .1)
+    armed.set()
+
+    def read():
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                return upstream.get_json("/api/admin")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        warm = pool.submit(read)
+        try:
+            assert read_entered.wait(2)
+            entry.expires_at = 0
+            refresh = pool.submit(read)
+            assert login_entered.wait(2)
+            read_release.set()
+            assert warm.result(timeout=2)["username"] == "admin"
+            assert not refresh.done(), "refresh must still hold the session lock"
+        finally:
+            read_release.set()
+            login_release.set()
+        assert refresh.result(timeout=2)["username"] == "admin"
+    assert admin.handshakes == 2
+    assert {cookie.value for cookie in entry.cookies if cookie.name == "sid"} == {"session-2"}
+
+
+def test_projection_continuous_credential_rotation_fails_with_bounded_typed_error(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    calls = 0
+    original = management._admin_secret
+
+    def rotating_secret(*args):
+        nonlocal calls
+        secret = dict(original(*args))
+        calls += 1
+        secret["password"] = f"rotation-{calls}"
+        return secret
+
+    monkeypatch.setattr(management, "_admin_secret", rotating_secret)
+    with db.connect(settings) as conn:
+        with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+            with pytest.raises(AppError) as caught:
+                upstream.get_json("/api/admin")
+    assert caught.value.code == "ADMIN_SECRET_CHANGED" and caught.value.status == 503
+    assert calls == 5
+    assert admin.session_requests == []
+
+
+def test_projection_session_isolated_by_connection_endpoint_and_prefix(read_sessions):
+    client, _settings, csrf, admin = read_sessions
+    bodies = [
+        {"name": "root", "admin_url": "http://admin.local:23646", "admin_secret_ref": "server-admin"},
+        {"name": "second identity", "admin_url": "http://admin.local:23646", "admin_secret_ref": "server-admin"},
+        {"name": "other host", "admin_url": "http://other.local:23646", "admin_secret_ref": "other-admin"},
+        {"name": "prefix", "admin_url": "http://admin.local:23646/proxy", "admin_secret_ref": "prefixed-admin"},
+    ]
+    connections = [create_connection_body(client, csrf, body).json() for body in bodies]
+    for connection in connections + connections:
+        response = client.get(f"/api/v1/management/{connection['id']}/overview")
+        assert response.status_code == 200, response.text
+    assert admin.handshakes == len(connections)
+
+
+@pytest.mark.parametrize("expiry", ["ttl", "cookie", "unauthenticated", "redirect"])
+def test_projection_session_expiry_reauthenticates_only_reads(read_sessions, expiry):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    url = f"/api/v1/management/{connection['id']}/overview"
+    assert client.get(url).status_code == 200
+    entry = next(iter(management._ADMIN_READ_SESSIONS.values()))
+    if expiry == "ttl":
+        entry.expires_at = -1
+    elif expiry == "cookie":
+        entry.cookies[0].expires = 1
+    else:
+        admin.sessions.clear()
+        if expiry == "redirect":
+            admin.expired_response = 302
+    assert client.get(url).status_code == 200
+    assert admin.handshakes == 2
+
+
+def test_projection_concurrency_collapses_login_and_closes_each_client(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    admin.login_delay = .02
+    created = []
+    original_client = httpx.Client
+
+    def tracked_client(*args, **kwargs):
+        assert kwargs.get("verify", True) is True
+        assert kwargs["trust_env"] is False and kwargs["follow_redirects"] is False
+        upstream = original_client(*args, **kwargs)
+        created.append(upstream)
+        return upstream
+
+    monkeypatch.setattr(management.httpx, "Client", tracked_client)
+
+    def read(_number):
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                return upstream.get_json("/api/admin")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(read, range(8)))
+    assert len(results) == 8
+    assert admin.handshakes == 1
+    assert len(created) == 8 and all(upstream.is_closed for upstream in created)
+
+
+@pytest.mark.parametrize("late_auth_failure", [False, True])
+def test_warm_projection_reads_run_concurrently_and_old_failures_preserve_new_session(read_sessions, monkeypatch, late_auth_failure):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    entered, release = threading.Event(), threading.Event()
+    delayed = False
+
+    def gated(request):
+        nonlocal delayed
+        if request.url.params.get("held") == "yes" and not delayed:
+            delayed = True
+            entered.set()
+            assert release.wait(5), "held read was not released"
+            if late_auth_failure:
+                return httpx.Response(401, json={"error": "old session expired"})
+        return admin(request)
+
+    monkeypatch.setattr(management, "_TEST_TRANSPORT", httpx.MockTransport(gated))
+
+    def read(held=False):
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                return upstream.get_json("/api/admin", params={"held": "yes"} if held else None)
+
+    read()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(read, True)
+        try:
+            assert entered.wait(2)
+            if late_auth_failure:
+                admin.sessions.clear()
+            second = pool.submit(read)
+            assert second.result(timeout=2)["username"] == "admin"
+            assert admin.handshakes == (2 if late_auth_failure else 1)
+        finally:
+            release.set()
+        assert first.result(timeout=2)["username"] == "admin"
+    read()
+    assert admin.handshakes == (2 if late_auth_failure else 1)
+
+
+def test_projection_rechecks_revoked_approval_after_waiting_for_session_lock(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    assert client.get(f"/api/v1/management/{connection['id']}/overview").status_code == 200
+    entry = next(iter(management._ADMIN_READ_SESSIONS.values()))
+    validated = threading.Event()
+    original_validate = management.AdminClient._validate_credentials
+
+    def notify_validation(upstream):
+        original_validate(upstream)
+        validated.set()
+
+    monkeypatch.setattr(management.AdminClient, "_validate_credentials", notify_validation)
+
+    def read():
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                return upstream.get_json("/api/admin")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        entry.lock.acquire()
+        try:
+            future = pool.submit(read)
+            assert validated.wait(2)
+            before = len(admin.session_requests)
+            registry = json.loads(settings.secrets_file.read_text(encoding="utf-8"))
+            registry.pop("server-admin")
+            settings.secrets_file.write_text(json.dumps(registry), encoding="utf-8")
+        finally:
+            entry.lock.release()
+        with pytest.raises(AppError) as caught:
+            future.result(timeout=2)
+    assert caught.value.code == "ADMIN_SECRET_NOT_FOUND"
+    assert len(admin.session_requests) == before
+
+
+def test_projection_session_cache_is_bounded_and_writes_use_fresh_auth(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    monkeypatch.setattr(management, "_ADMIN_READ_SESSION_LIMIT", 2)
+    connections = [create_connection(client, csrf) for _ in range(3)]
+    for connection in connections:
+        assert client.get(f"/api/v1/management/{connection['id']}/overview").status_code == 200
+    assert admin.handshakes == 3 and len(management._ADMIN_READ_SESSIONS) == 2
+    assert client.get(f"/api/v1/management/{connections[0]['id']}/overview").status_code == 200
+    assert admin.handshakes == 4
+    with db.connect(settings) as conn:
+        with management.admin_client(settings, conn, connections[0]["id"]) as upstream:
+            admin.reject_writes = True
+            with pytest.raises(AppError) as caught:
+                upstream.request_json("PUT", "/api/users/alice", {"email": "new@example.com"})
+            assert caught.value.code == "ADMIN_UNAUTHENTICATED"
+    assert admin.handshakes == 5
+    assert sum(request.method == "PUT" for request in admin.session_requests) == 1
 
 
 def test_login_csrf_rotates_and_public_redaction(api):

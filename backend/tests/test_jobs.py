@@ -33,7 +33,7 @@ class FakePagedS3:
         self.list_calls += 1
         keys = sorted(key for key in self.objects if key.startswith(kwargs["Prefix"]))
         start = int(kwargs.get("ContinuationToken") or 0)
-        max_keys = min(1, int(kwargs["MaxKeys"]))
+        max_keys = int(kwargs["MaxKeys"])
         page = keys[start:start + max_keys]
         next_index = start + len(page)
         return {
@@ -156,6 +156,7 @@ def test_reap_cancelled_running_job_clears_lease_and_fences_executor(connection)
     claimed = jobs.claim(conn)
     assert claimed is not None
 
+    conn.execute("INSERT INTO scan_listing_pages(job_id,page_json) VALUES(?,?)", (submitted["id"], '[]'))
     conn.execute("UPDATE jobs SET cancel_requested_at=?, lease_expires_at=? WHERE id=?", (jobs.now(), "2000-01-01T00:00:00.000000Z", submitted["id"]))
     jobs.reap(conn)
     conn.commit()
@@ -164,6 +165,7 @@ def test_reap_cancelled_running_job_clears_lease_and_fences_executor(connection)
     assert row["state"] == "cancelled"
     assert row["lease_token"] is None
     assert row["fencing_version"] > claimed["fencing_version"]
+    assert conn.execute("SELECT 1 FROM scan_listing_pages WHERE job_id=?", (submitted["id"],)).fetchone() is None
 
 
 def test_paused_queued_job_is_not_claimed_until_resumed(connection) -> None:
@@ -193,7 +195,7 @@ def test_scan_processes_more_than_five_pages_and_preserves_raw_prefixes(connecti
     }
     fake_s3 = FakePagedS3(objects)
     monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake_s3)
-    submitted = jobs.submit_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 20, "objects_per_second": 100})
+    submitted = jobs.submit_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 20, "objects_per_second": 100, "page_size": 1})
     conn.commit()
     claimed = jobs.claim(conn)
     assert claimed is not None

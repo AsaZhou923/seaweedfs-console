@@ -26,9 +26,11 @@ class Body(io.BytesIO):
 
 
 class FakeS3:
-    def __init__(self, objects: dict[str, bytes]):
+    def __init__(self, objects: dict[str, bytes], *, page_limit: int | None = None):
         self.objects = objects
+        self.page_limit = page_limit
         self.list_calls = 0
+        self.list_max_keys: list[int] = []
         self.bodies: list[Body] = []
 
     def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
@@ -36,7 +38,9 @@ class FakeS3:
         keys = sorted(key for key in self.objects if key.startswith(kwargs["Prefix"]))
         start = int(kwargs.get("ContinuationToken") or 0)
         max_keys = int(kwargs["MaxKeys"])
-        page = keys[start:start + max_keys]
+        self.list_max_keys.append(max_keys)
+        returned_size = min(max_keys, self.page_limit) if self.page_limit is not None else max_keys
+        page = keys[start:start + returned_size]
         next_index = start + len(page)
         return {
             "Contents": [self._listed(key) for key in page],
@@ -157,6 +161,277 @@ def test_scan_resume_midpage_uses_saved_page_without_relisting(foundation, monke
     assert fake.list_calls == 0
     keys = [row["key"] for row in conn.execute("SELECT key FROM objects ORDER BY key")]
     assert keys == ["raw/b.jpg"]
+
+
+@pytest.mark.parametrize("page_params, expected_size, expected_calls", [
+    ({}, 1000, 3),
+    ({"page_size": 10}, 10, 4),
+    ({"list_max_keys": 12}, 12, 3),
+    ({"page_size": 20, "list_max_keys": 1}, 20, 3),
+])
+def test_scan_pages_honor_requested_size_and_reduce_listing_calls(foundation, monkeypatch, page_params, expected_size, expected_calls):
+    conn, settings, scope = foundation
+    payload = image_bytes()
+    # S3 may return fewer objects than MaxKeys while supplying a continuation token.
+    fake = FakeS3({f"raw/{index:04d}.jpg": payload for index in range(33)}, page_limit=16)
+    decoded_properties, _ = catalog.imaging.decode(payload)
+    monkeypatch.setattr(catalog.imaging, "decode", lambda *_args, **_kwargs: (dict(decoded_properties), None))
+    page_serializations, page_writes, checkpoint_sizes = [], [], []
+    real_dumps, real_connect, real_checkpoint = json.dumps, db.connect, jobs.checkpoint
+
+    def track_serialization(value, *args, **kwargs):
+        if isinstance(value, list) and value and isinstance(value[0], dict) and "key" in value[0]:
+            page_serializations.append(1)
+        return real_dumps(value, *args, **kwargs)
+
+    def track_connection(*args, **kwargs):
+        tracked = real_connect(*args, **kwargs)
+        tracked.set_trace_callback(lambda sql: page_writes.append(1) if sql.startswith("INSERT OR REPLACE INTO scan_listing_pages") else None)
+        return tracked
+
+    def track_checkpoint(*args, **kwargs):
+        if kwargs.get("data") is not None:
+            checkpoint_sizes.append(len(real_dumps(kwargs["data"])))
+        return real_checkpoint(*args, **kwargs)
+
+    monkeypatch.setattr(catalog.json, "dumps", track_serialization)
+    monkeypatch.setattr(catalog.db, "connect", track_connection)
+    monkeypatch.setattr(catalog.jobs, "checkpoint", track_checkpoint)
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    monkeypatch.setattr(catalog, "_rate_wait", lambda *_args: None)
+    claimed = claim_job(conn, scope["id"], "scan", {
+        "authz_epoch": scope["authz_epoch"], "max_objects": 2000, **page_params,
+    })
+
+    catalog.execute_job(claimed, settings)
+
+    stored = conn.execute("SELECT state,processed,errors FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    assert dict(stored) == {"state": "succeeded", "processed": 33, "errors": 0}
+    assert fake.list_calls == expected_calls
+    assert fake.list_max_keys == [expected_size] * expected_calls
+    assert len(page_serializations) == expected_calls
+    assert len(page_writes) == expected_calls
+    assert max(checkpoint_sizes) < 512, "per-object checkpoints must contain only small cursor/position metadata"
+    assert len(fake.bodies) == 33
+    assert conn.execute("SELECT count(*) FROM objects WHERE scan_id=?", (claimed["id"],)).fetchone()[0] == 33
+    assert conn.execute("SELECT count(*) FROM scan_listing_pages WHERE job_id=?", (claimed["id"],)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("control", ["pause", "cancel"])
+def test_scan_large_page_keeps_unprocessed_entries_at_control_checkpoint(foundation, monkeypatch, control):
+    conn, settings, scope = foundation
+    fake = FakeS3({f"raw/{letter}.jpg": image_bytes() for letter in "abc"})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    claimed = claim_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 10})
+    controls = []
+
+    def request_control(*_args):
+        if not controls:
+            controls.append(control)
+            conn.execute(f"UPDATE jobs SET {control}_requested_at=? WHERE id=?", (jobs.now(), claimed["id"]))
+            conn.commit()
+
+    monkeypatch.setattr(catalog, "_rate_wait", request_control)
+    catalog.execute_job(claimed, settings)
+    stored = conn.execute("SELECT state,processed,checkpoint_json FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    checkpoint = json.loads(stored["checkpoint_json"])
+    assert stored["state"] == ("paused" if control == "pause" else "cancelled")
+    assert stored["processed"] == 1
+    assert checkpoint["position"] == 1
+    assert "page" not in checkpoint
+    saved = conn.execute("SELECT page_json FROM scan_listing_pages WHERE job_id=?", (claimed["id"],)).fetchone()
+    if control == "pause":
+        assert checkpoint["page_stored"] is True
+        assert [item["key"] for item in json.loads(saved["page_json"])] == ["raw/a.jpg", "raw/b.jpg", "raw/c.jpg"]
+    else:
+        assert saved is None, "terminal cancelled scans release the saved listing"
+    assert fake.list_calls == 1
+    assert len(fake.bodies) == 1
+    if control == "pause":
+        conn.execute("UPDATE jobs SET state='queued',pause_requested_at=NULL WHERE id=?", (claimed["id"],))
+        conn.commit()
+        resumed = jobs.claim(conn)
+        catalog.execute_job(resumed, settings)
+        result = conn.execute("SELECT state,processed,errors FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+        assert dict(result) == {"state": "succeeded", "processed": 3, "errors": 0}
+        assert fake.list_calls == 1
+        assert len(fake.bodies) == 3
+        assert [row["key"] for row in conn.execute("SELECT key FROM objects ORDER BY key")] == ["raw/a.jpg", "raw/b.jpg", "raw/c.jpg"]
+
+
+def test_scan_stops_before_oversized_page_exceeds_budget(foundation, monkeypatch):
+    conn, settings, scope = foundation
+
+    class OversizedPageS3(FakeS3):
+        def list_objects_v2(self, **kwargs):
+            return super().list_objects_v2(**{**kwargs, "MaxKeys": 3})
+
+    fake = OversizedPageS3({f"raw/{letter}.jpg": image_bytes() for letter in "abc"})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    monkeypatch.setattr(catalog, "_rate_wait", lambda *_args: None)
+    claimed = claim_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 2})
+
+    catalog.execute_job(claimed, settings)
+
+    stored = conn.execute("SELECT state,processed,error_code,checkpoint_json FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    checkpoint = json.loads(stored["checkpoint_json"])
+    assert stored["state"] == "failed"
+    assert stored["error_code"] == "SCAN_BUDGET_EXHAUSTED"
+    assert stored["processed"] == 2
+    assert checkpoint["position"] == 2
+    assert "page" not in checkpoint
+    assert conn.execute("SELECT count(*) FROM scan_listing_pages WHERE job_id=?", (claimed["id"],)).fetchone()[0] == 0
+    assert len(fake.bodies) == 2
+    assert conn.execute("SELECT count(*) FROM capacity_samples WHERE id=?", (claimed["id"],)).fetchone()[0] == 0
+
+
+def test_scan_resume_does_not_repeat_failed_entries_in_saved_page(foundation, monkeypatch):
+    conn, settings, scope = foundation
+
+    class FailedHeadS3(FakeS3):
+        def head_object(self, **kwargs):
+            if kwargs["Key"] == "raw/a.jpg":
+                raise Unavailable()
+            return super().head_object(**kwargs)
+
+    fake = FailedHeadS3({f"raw/{letter}.jpg": image_bytes() for letter in "abc"})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    claimed = claim_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 10})
+    waits = []
+
+    def pause_after_failed_entry(*_args):
+        if not waits:
+            conn.execute("UPDATE jobs SET pause_requested_at=? WHERE id=?", (jobs.now(), claimed["id"]))
+            conn.commit()
+        waits.append(True)
+
+    monkeypatch.setattr(catalog, "_rate_wait", pause_after_failed_entry)
+    catalog.execute_job(claimed, settings)
+    paused = conn.execute("SELECT state,processed,errors FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    assert dict(paused) == {"state": "paused", "processed": 1, "errors": 1}
+    conn.execute("UPDATE jobs SET state='queued',pause_requested_at=NULL WHERE id=?", (claimed["id"],))
+    conn.commit()
+
+    catalog.execute_job(jobs.claim(conn), settings)
+
+    stored = conn.execute("SELECT state,processed,errors FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    assert dict(stored) == {"state": "partially_failed", "processed": 3, "errors": 1}
+    assert fake.list_calls == 1
+    assert conn.execute("SELECT count(*) FROM job_items WHERE job_id=?", (claimed["id"],)).fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM objects WHERE scan_id=?", (claimed["id"],)).fetchone()[0] == 3
+
+
+@pytest.mark.parametrize("control", ["pause", "cancel"])
+def test_scan_control_during_listing_keeps_safe_checkpoint_before_indexing(foundation, monkeypatch, control):
+    conn, settings, scope = foundation
+    claimed = claim_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 10})
+
+    class ControlledListingS3(FakeS3):
+        def list_objects_v2(self, **kwargs):
+            response = super().list_objects_v2(**kwargs)
+            conn.execute(f"UPDATE jobs SET {control}_requested_at=? WHERE id=?", (jobs.now(), claimed["id"]))
+            conn.commit()
+            return response
+
+    fake = ControlledListingS3({f"raw/{letter}.jpg": image_bytes() for letter in "abc"})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    monkeypatch.setattr(catalog, "_rate_wait", lambda *_args: None)
+
+    catalog.execute_job(claimed, settings)
+
+    stored = conn.execute("SELECT state,processed,checkpoint_json FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    assert stored["state"] == ("paused" if control == "pause" else "cancelled")
+    assert stored["processed"] == 0
+    assert json.loads(stored["checkpoint_json"])["position"] == 0
+    assert len(fake.bodies) == 0
+    saved = conn.execute("SELECT page_json FROM scan_listing_pages WHERE job_id=?", (claimed["id"],)).fetchone()
+    if control == "pause":
+        assert len(json.loads(saved["page_json"])) == 3
+        conn.execute("UPDATE jobs SET state='queued',pause_requested_at=NULL WHERE id=?", (claimed["id"],))
+        conn.commit()
+        catalog.execute_job(jobs.claim(conn), settings)
+        assert fake.list_calls == 1
+        assert len(fake.bodies) == 3
+    else:
+        assert saved is None
+
+
+def test_scan_missing_stored_checkpoint_fails_without_relisting(foundation, monkeypatch):
+    conn, settings, scope = foundation
+    fake = FakeS3({"raw/a.jpg": image_bytes()})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    claimed = claim_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 10})
+    conn.execute("UPDATE jobs SET processed=1,checkpoint_json=? WHERE id=?", (json.dumps({
+        "token": None, "next_token": None, "page_stored": True, "position": 1,
+    }), claimed["id"]))
+    conn.commit()
+    recovered = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (claimed["id"],)).fetchone())
+
+    with pytest.raises(AppError) as error:
+        catalog.execute_job(recovered, settings)
+
+    assert error.value.code == "SCAN_CHECKPOINT_INVALID"
+    assert fake.list_calls == 0
+    assert len(fake.bodies) == 0
+
+
+@pytest.mark.parametrize("invalid_token", [None, "", "repeat"])
+def test_scan_truncated_listing_requires_an_advancing_token(foundation, monkeypatch, invalid_token):
+    conn, settings, scope = foundation
+
+    class InvalidPaginationS3(FakeS3):
+        def list_objects_v2(self, **_kwargs):
+            self.list_calls += 1
+            response = {"Contents": [self._listed("raw/a.jpg")], "IsTruncated": True}
+            if invalid_token == "repeat":
+                response["NextContinuationToken"] = "page-2"
+            elif invalid_token is not None:
+                response["NextContinuationToken"] = invalid_token
+            return response
+
+    fake = InvalidPaginationS3({"raw/a.jpg": image_bytes()})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    monkeypatch.setattr(catalog, "_rate_wait", lambda *_args: None)
+    submitted = jobs.submit_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 10})
+    conn.commit()
+
+    assert jobs.run_once(settings) is True
+
+    stored = conn.execute("SELECT state,processed,error_code FROM jobs WHERE id=?", (submitted["id"],)).fetchone()
+    assert dict(stored) == {
+        "state": "failed", "processed": 1 if invalid_token == "repeat" else 0,
+        "error_code": "SCAN_PAGINATION_INVALID",
+    }
+    assert fake.list_calls == (2 if invalid_token == "repeat" else 1), "malformed tokens must fail within a bounded number of list requests"
+    assert len(fake.bodies) == (1 if invalid_token == "repeat" else 0), "the repeated page must not index the same object again"
+    assert conn.execute("SELECT enumeration FROM scan_runs WHERE id=?", (submitted["id"],)).fetchone()[0] == "partial"
+    assert conn.execute("SELECT count(*) FROM capacity_samples WHERE id=?", (submitted["id"],)).fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM scan_listing_pages WHERE job_id=?", (submitted["id"],)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("has_next_page", [False, True])
+def test_scan_resume_after_last_checkpointed_entry_does_not_relist_old_page(foundation, monkeypatch, has_next_page):
+    conn, settings, scope = foundation
+    fake = FakeS3({f"raw/{letter}.jpg": image_bytes() for letter in ("abc" if has_next_page else "ab")})
+    monkeypatch.setattr(catalog, "s3_for", lambda *_args: fake)
+    monkeypatch.setattr(catalog, "_rate_wait", lambda *_args: None)
+    claimed = claim_job(conn, scope["id"], "scan", {"authz_epoch": scope["authz_epoch"], "max_objects": 10})
+    for key in ("raw/a.jpg", "raw/b.jpg"):
+        core.upsert_object(conn, scope["id"], catalog.observation(key, fake.head_object(Key=key)) | {"scan_id": claimed["id"]})
+    saved_page = [catalog._checkpoint_listing(fake._listed(key)) for key in ("raw/a.jpg", "raw/b.jpg")]
+    conn.execute("UPDATE jobs SET processed=2,checkpoint_json=? WHERE id=?", (json.dumps({
+        "token": None, "next_token": "2" if has_next_page else None, "page": saved_page, "position": 2,
+    }), claimed["id"]))
+    conn.commit()
+    recovered = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (claimed["id"],)).fetchone())
+
+    catalog.execute_job(recovered, settings)
+
+    stored = conn.execute("SELECT state,processed FROM jobs WHERE id=?", (claimed["id"],)).fetchone()
+    assert dict(stored) == {"state": "succeeded", "processed": 3 if has_next_page else 2}
+    assert fake.list_calls == (1 if has_next_page else 0)
+    assert len(fake.bodies) == (1 if has_next_page else 0)
+    assert [row["key"] for row in conn.execute("SELECT key FROM objects ORDER BY key")] == sorted(fake.objects)
 
 
 def test_checkpoint_cas_rejects_stale_publish(foundation):
@@ -325,9 +600,9 @@ def test_missing_candidate_phase_checkpoints_each_batch_and_rate_limits(foundati
 
     catalog.execute_job(claimed, settings)
 
-    # One lease refresh before every HEAD, plus one per batch read (3 batches + the empty final read).
-    assert len(phases) == 120 + 4
-    assert phases[0]["last_candidate"] == "" and all(phase["last_candidate"] for phase in phases[2:])
+    # The phase transition, every HEAD, and each batch read (3 batches + the empty final read).
+    assert len(phases) == 120 + 5
+    assert phases[0]["last_candidate"] == "" and all(phase["last_candidate"] for phase in phases[3:])
     assert len(fake.heads) == 120
     assert len(sleeps) == 120
     assert conn.execute("SELECT COUNT(*) FROM objects WHERE presence='missing_confirmed'").fetchone()[0] == 120

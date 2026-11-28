@@ -266,6 +266,16 @@ Object version lists expose `is_latest` for both object versions and delete mark
 
 Management operation history includes the HTTP method, path and a display target where the journal retains enough information. The path omits URL queries and fragments. The target comes from recorded resource identifiers. Dedicated conditional-delete probes also identify their Scope and probe key.
 
+## Scan pagination and read requests
+
+`POST /api/v1/scopes/{scope_id}/scans` accepts an optional integer `page_size` from 1 to 1,000. By default the worker requests up to 1,000 keys per ListObjectsV2 call, limited by the remaining `max_objects` budget. Smaller upstream pages can still carry a continuation token. A paused scan retains the current listing and its position. The worker can also resume older checkpoints that embed their listing.
+
+Omitting `page_size`, passing `null` and passing `1000` describe the same scan intent. Reusing its idempotency key with a different page size returns HTTP 409.
+
+`GET /api/v1/jobs` authenticates the request once and returns the most recent 200 jobs visible in active Scopes. A requested unavailable Scope still returns HTTP 403. Preview requests reuse a bounded S3 HEAD client after checking current credentials and endpoint approval on each use. Every preview still verifies the stored object's revision against storage.
+
+Read-only Admin projections (overview, topology, services, collections, erasure coding and volumes) can reuse an authenticated upstream session for up to 60 seconds. The console rechecks the backend registry and endpoint approval on each use. Authorization failure on a reused read allows one fresh login and read attempt. Management writes keep their own client and durable intent handling.
+
 ## Request validation for project storage
 
 - Supply required names, object identifiers, keys, version IDs and snapshot IDs as JSON strings. Object keys retain their literal spelling, including spaces. For preview batches, checksum scans and snapshots, an explicit object selection uses an `object_ids` array of string IDs.

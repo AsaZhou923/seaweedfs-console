@@ -9,6 +9,10 @@ data/
 *.db-shm
 *.db-wal
 secrets.json
+cursor-signing.key
+csrf-signing.key
+.cursor-signing-*.key
+.csrf-signing-*.key
 test-results/
 output/
 .omx/

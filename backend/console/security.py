@@ -188,7 +188,7 @@ def current_user(request):
     if not token:
         raise AppError("UNAUTHENTICATED", "Session is missing or expired.", 401)
     with db.connect(settings) as conn:
-        principal, session = current_user_from_token(conn, token)
+        principal, session = current_user_from_token(conn, token, settings)
     request.state.user = principal
     request.state.session = session
     return principal

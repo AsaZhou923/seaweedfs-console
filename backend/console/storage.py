@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import atexit
+from collections import OrderedDict
 from contextlib import closing
+from dataclasses import dataclass
+import hashlib
+import json
+import logging
 import re
+from threading import RLock
 from typing import Any, Iterator
 
 from .config import Settings, load_secret_registry
@@ -59,6 +66,97 @@ def client(connection: dict[str, Any], settings: Settings):
         config=config,
         **{k: v for k, v in secret.items() if v is not None},
     )
+
+
+@dataclass
+class _HeadClientEntry:
+    client: Any
+    users: int = 0
+    retired: bool = False
+
+
+_HEAD_CLIENTS: OrderedDict[tuple, _HeadClientEntry] = OrderedDict()
+_HEAD_CLIENT_LOCK = RLock()
+_HEAD_CLIENT_CACHE_LIMIT = 32
+
+
+def _close_head_client(entry: _HeadClientEntry) -> None:
+    close = getattr(entry.client, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:
+            logging.getLogger(__name__).warning("S3 HEAD client cleanup failed")
+
+
+def _retire_head_client(entry: _HeadClientEntry) -> None:
+    entry.retired = True
+    if not entry.users:
+        _close_head_client(entry)
+
+
+def _invalidate_head_clients(identity: tuple) -> None:
+    for key in list(_HEAD_CLIENTS):
+        if key[:2] == identity:
+            _retire_head_client(_HEAD_CLIENTS.pop(key))
+
+
+def clear_head_client_cache() -> None:
+    with _HEAD_CLIENT_LOCK:
+        for entry in _HEAD_CLIENTS.values():
+            _retire_head_client(entry)
+        _HEAD_CLIENTS.clear()
+
+
+def _lease_head_client(connection: dict[str, Any], settings: Settings) -> _HeadClientEntry:
+    identity = (str(settings.secrets_file.absolute()) if settings.secrets_file else "", connection["id"])
+    for _attempt in range(2):
+        with _HEAD_CLIENT_LOCK:
+            try:
+                secret = secret_for_connection(settings, connection)
+            except Exception:
+                _invalidate_head_clients(identity)
+                raise
+            fingerprint = hashlib.sha256(json.dumps(secret, sort_keys=True).encode()).digest()
+            key = (*identity, connection["endpoint_url"], connection.get("region"), bool(connection.get("verify_tls", True)),
+                   connection.get("addressing_style") or "path", settings.s3_connect_timeout_seconds,
+                   settings.s3_read_timeout_seconds, fingerprint, client)
+            entry = _HEAD_CLIENTS.get(key)
+            if entry is None:
+                _invalidate_head_clients(identity)
+                owned = client(connection, settings)
+                try:
+                    unchanged = secret_for_connection(settings, connection) == secret
+                except Exception:
+                    _close_head_client(_HeadClientEntry(owned))
+                    raise
+                if not unchanged:
+                    _close_head_client(_HeadClientEntry(owned))
+                    continue
+                entry = _HeadClientEntry(owned)
+                _HEAD_CLIENTS[key] = entry
+            entry.users += 1
+            _HEAD_CLIENTS.move_to_end(key)
+            while len(_HEAD_CLIENTS) > _HEAD_CLIENT_CACHE_LIMIT:
+                _old_key, old_entry = _HEAD_CLIENTS.popitem(last=False)
+                _retire_head_client(old_entry)
+            return entry
+    raise StorageError("SECRET_REF_CHANGED", "Storage credentials changed before dispatch.", 409)
+
+
+def head_object(connection: dict[str, Any], settings: Settings, **kwargs):
+    """Reuse clients only for one bounded HEAD, retaining caller-owned clients elsewhere."""
+    entry = _lease_head_client(dict(connection), settings)
+    try:
+        return entry.client.head_object(**kwargs)
+    finally:
+        with _HEAD_CLIENT_LOCK:
+            entry.users -= 1
+            if entry.retired and not entry.users:
+                _close_head_client(entry)
+
+
+atexit.register(clear_head_client_cache)
 
 
 def probe_read_capabilities(s3: Any, bucket: str | None = None, prefix: str = "") -> dict[str, Any]:
