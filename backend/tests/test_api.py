@@ -193,6 +193,48 @@ def scan_scope(client: TestClient, app, csrf: str, scope_id: str) -> list[dict]:
     return assets.json()["items"]
 
 
+def test_scan_page_size_rejects_invalid_values_before_submission(api):
+    client, app, _fake = api
+    csrf = login(client)
+    _, _, scope_id = create_scope(client, csrf)
+    for value, status in [(True, 422), (False, 422), (1.5, 422), ("100", 422), ([], 422), ({}, 422), (0, 429), (-1, 429), (1001, 429)]:
+        response = client.post(f"/api/v1/scopes/{scope_id}/scans", json={"page_size": value}, headers=authed_headers(csrf))
+        assert response.status_code == status, (value, response.text)
+        assert response.json()["error"]["field"] == "page_size"
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM jobs WHERE scope_id=?", (scope_id,)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("page_size", [1, 1000])
+def test_scan_page_size_is_persisted_for_worker(api, page_size):
+    client, app, _fake = api
+    csrf = login(client)
+    _, _, scope_id = create_scope(client, csrf)
+    response = client.post(f"/api/v1/scopes/{scope_id}/scans", json={"page_size": page_size}, headers=authed_headers(csrf))
+    assert response.status_code == 200, response.text
+    with db.connect(app.state.settings) as conn:
+        params = json.loads(conn.execute("SELECT params_json FROM jobs WHERE id=?", (response.json()["id"],)).fetchone()[0])
+    assert params["page_size"] == page_size
+
+
+def test_scan_default_page_size_preserves_legacy_request_replay(api):
+    client, app, _fake = api
+    csrf = login(client)
+    _, _, scope_id = create_scope(client, csrf)
+    with db.connect(app.state.settings) as conn:
+        epoch = conn.execute("SELECT authz_epoch FROM scopes WHERE id=?", (scope_id,)).fetchone()[0]
+        actor = conn.execute("SELECT id FROM users WHERE username='admin'").fetchone()[0]
+        legacy = jobs.submit_job(conn, scope_id, "scan", {
+            "authz_epoch": epoch, "max_objects": 100000, "objects_per_second": 20.0,
+        }, actor=actor, idempotency_key="legacy-scan")
+    for body in ({}, {"page_size": None}):
+        response = client.post(f"/api/v1/scopes/{scope_id}/scans", json=body, headers={**authed_headers(csrf), "Idempotency-Key": "legacy-scan"})
+        assert response.status_code == 200, response.text
+        assert response.json()["id"] == legacy["id"]
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM jobs WHERE scope_id=?", (scope_id,)).fetchone()[0] == 1
+
+
 def test_required_enhancement_fields_reject_malformed_values_before_side_effects(api, monkeypatch):
     from console import enhancement_api
 
@@ -375,6 +417,44 @@ def test_scan_preview_archive_and_cached_media_denied(api):
     assert client.get(f"/api/v1/scopes/{scope_id}/assets").status_code == 403
 
 
+def test_thumbnail_burst_reuses_client_and_rechecks_revision_and_endpoint(api, monkeypatch):
+    client, app, fake = api
+    csrf = login(client)
+    _connection_id, _project_id, scope_id = create_scope(client, csrf)
+    object_id = next(item["id"] for item in scan_scope(client, app, csrf, scope_id) if item["key"] == "gallery/a.jpg")
+    submitted = client.post(f"/api/v1/scopes/{scope_id}/preview-batches", json={"object_ids": [object_id]}, headers=authed_headers(csrf))
+    assert submitted.status_code in (200, 202)
+    run_all_jobs(app)
+    storage.clear_head_client_cache()
+    counts = {"builds": 0, "heads": 0}
+    head = fake.head_object
+
+    def build(*_args):
+        counts["builds"] += 1
+        return fake
+
+    def checked_head(**kwargs):
+        counts["heads"] += 1
+        return head(**kwargs)
+
+    monkeypatch.setattr(storage, "client", build)
+    monkeypatch.setattr(fake, "head_object", checked_head)
+    url = f"/api/v1/scopes/{scope_id}/objects/{object_id}/preview"
+    try:
+        for _ in range(60):
+            assert client.get(url).status_code == 200
+        assert counts == {"builds": 1, "heads": 60}
+        fake.objects["gallery/a.jpg"] = b"changed-source"
+        assert client.get(url).status_code == 409, "cached clients must retain per-request revision verification"
+        assert counts == {"builds": 1, "heads": 61}
+        registry = app.state.settings.secrets_file
+        registry.write_text("{}", encoding="utf-8")
+        assert client.get(url).status_code == 403, "revoked credentials must block even a cached thumbnail"
+        assert counts == {"builds": 1, "heads": 61}
+    finally:
+        storage.clear_head_client_cache()
+
+
 def test_object_ids_cannot_cross_scope(api):
     client, app, _fake = api
     csrf = login(client)
@@ -540,7 +620,7 @@ def test_scope_creation_rejects_malformed_privileges_and_prefix(api, change):
         assert conn.execute('SELECT count(*) FROM scopes').fetchone()[0] == 1
 
 
-def test_scope_jobs_are_filtered_before_limit(api):
+def test_scope_jobs_are_filtered_before_limit(api, monkeypatch):
     client, app, _ = api
     csrf = login(client)
     _, _, scope_a = create_scope(client, csrf, 'gallery/')
@@ -556,6 +636,24 @@ def test_scope_jobs_are_filtered_before_limit(api):
     response = client.get('/api/v1/jobs', params={'scope_id': scope_a})
     assert response.status_code == 200
     assert [item['id'] for item in response.json()['items']] == [wanted['id']]
+
+    connect = db.connect
+    opened = 0
+
+    def count_connections(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(db, "connect", count_connections)
+    populated = client.get('/api/v1/jobs')
+    assert populated.status_code == 200
+    assert len(populated.json()['items']) == 200
+    assert opened <= 2  # Authenticate once, then query visible jobs.
+    with connect(app.state.settings) as conn:
+        conn.execute("UPDATE scopes SET is_active=0 WHERE id=?", (scope_b,))
+    assert [item['id'] for item in client.get('/api/v1/jobs').json()['items']] == [wanted['id']]
+    assert client.get('/api/v1/jobs', params={'scope_id': scope_b}).status_code == 403
 
 
 def test_job_controls_with_real_session_and_repeated_requests(api):

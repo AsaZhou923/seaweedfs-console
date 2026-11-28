@@ -5,7 +5,9 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
@@ -26,6 +28,34 @@ SOURCE_SHA = "530be3e37337488ecc34d58441e0bc476e121c93"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_VOLUME_PAGE = 200
 _TEST_TRANSPORT: httpx.BaseTransport | None = None
+_ADMIN_READ_SESSION_TTL = 60.0
+_ADMIN_READ_SESSION_LIMIT = 32
+_ADMIN_READ_SESSIONS: OrderedDict[tuple, "_AdminReadSession"] = OrderedDict()
+_ADMIN_READ_SESSIONS_LOCK = threading.Lock()
+
+
+class _AdminReadSession:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.csrf = None
+        self.cookies = []
+        self.expires_at = 0.0
+        self.generation = 0
+
+    def clear(self):
+        self.csrf = None
+        self.cookies = []
+        self.expires_at = 0.0
+        self.generation += 1
+
+
+def _admin_read_session(key: tuple) -> _AdminReadSession:
+    with _ADMIN_READ_SESSIONS_LOCK:
+        session = _ADMIN_READ_SESSIONS.pop(key, None) or _AdminReadSession()
+        _ADMIN_READ_SESSIONS[key] = session
+        while len(_ADMIN_READ_SESSIONS) > _ADMIN_READ_SESSION_LIMIT:
+            _ADMIN_READ_SESSIONS.popitem(last=False)
+        return session
 
 READ_PATHS = {
     "/api/admin",
@@ -296,7 +326,7 @@ def volumes(request: Request, management_id: str, limit: int = 50, cursor: str |
         initialize(conn)
         mgmt = require_management_row(conn, management_id)
         _validate_stored_endpoints(request.app.state.settings, mgmt)
-        with admin_client(request.app.state.settings, conn, mgmt) as client:
+        with admin_client(request.app.state.settings, conn, mgmt, reuse_read_session=True) as client:
             return _volumes(client, request.app.state.settings, mgmt, limit=limit, cursor=cursor, collection=collection, readonly=readonly, disk_type=disk_type)
 
 
@@ -316,7 +346,7 @@ def _read_projection(request: Request, management_id: str, projector):
         initialize(conn)
         mgmt = require_management_row(conn, management_id)
         _validate_stored_endpoints(request.app.state.settings, mgmt)
-        with admin_client(request.app.state.settings, conn, mgmt) as client:
+        with admin_client(request.app.state.settings, conn, mgmt, reuse_read_session=True) as client:
             return projector(client, mgmt)
 
 
@@ -390,7 +420,7 @@ def get_management(conn: sqlite3.Connection, id: str) -> dict[str, Any]:
     return require_management_row(conn, id)
 
 
-def admin_client(settings: Settings, conn: sqlite3.Connection, management: dict[str, Any] | str) -> "AdminClient":
+def admin_client(settings: Settings, conn: sqlite3.Connection, management: dict[str, Any] | str, *, reuse_read_session: bool = False) -> "AdminClient":
     if isinstance(management, str):
         row = require_management_row(conn, management)
     else:
@@ -402,7 +432,9 @@ def admin_client(settings: Settings, conn: sqlite3.Connection, management: dict[
             row = candidate
     _validate_stored_endpoints(settings, row)
     secret = _admin_secret(settings, row["admin_secret_ref"])
-    return AdminClient(settings, row, secret)
+    if _normalize_endpoint(secret["allowed_endpoint_url"]) != _normalize_endpoint(row["admin_url"]):
+        raise AppError("ADMIN_ENDPOINT_DENIED", "Admin endpoint does not match the approved secret binding.", 403)
+    return AdminClient(settings, row, secret, reuse_read_session=reuse_read_session)
 
 
 def associated_s3_client(settings: Settings, management: dict[str, Any] | str):
@@ -430,7 +462,7 @@ def associated_s3_client(settings: Settings, management: dict[str, Any] | str):
 
 
 class AdminClient:
-    def __init__(self, settings: Settings, management: dict[str, Any], secret: dict[str, Any]):
+    def __init__(self, settings: Settings, management: dict[str, Any], secret: dict[str, Any], *, reuse_read_session: bool = False):
         self.settings = settings
         self.management = management
         self.endpoint_url = _normalize_endpoint(management["admin_url"])
@@ -440,8 +472,11 @@ class AdminClient:
         self.secret = secret
         self.checked_at = utc_now()
         self._csrf: str | None = None
+        self._reuse_read_session = reuse_read_session
+        self._secret_fingerprint = None
         self._client = httpx.Client(
             base_url=self.base_url,
+            verify=True,
             trust_env=False,
             follow_redirects=False,
             timeout=8.0,
@@ -470,6 +505,73 @@ class AdminClient:
     ) -> Any:
         method = method.upper()
         _assert_allowed(method, path)
+        self._validate_credentials()
+        if self._reuse_read_session and method == "GET":
+            return self._cached_read(path, params, raw)
+        if self._reuse_read_session:
+            # A caller opting into read reuse must start a separate write session.
+            self._reuse_read_session = False
+            self._csrf = None
+            self._client.cookies.clear()
+        return self._request_json(method, path, json_body, params, raw)
+
+    def _validate_credentials(self) -> None:
+        _validate_stored_endpoints(self.settings, self.management)
+        secret = _admin_secret(self.settings, self.management["admin_secret_ref"])
+        if _normalize_endpoint(secret["allowed_endpoint_url"]) != self.endpoint_url:
+            raise AppError("ADMIN_ENDPOINT_DENIED", "Admin endpoint does not match the approved secret binding.", 403)
+        fingerprint = hashlib.sha256(json.dumps(secret, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if self._secret_fingerprint != fingerprint:
+            self._csrf = None
+            self._client.cookies.clear()
+        self.secret = secret
+        self._secret_fingerprint = fingerprint
+
+    def _cached_read(self, path: str, params: dict[str, Any] | None, raw: bool, *, retry_auth: bool = True) -> Any:
+        fingerprint = self._secret_fingerprint
+        key = (str(self.settings.database_path.resolve()), str(self.settings.secrets_file.resolve()),
+               self.management.get("id"), self.endpoint_url, fingerprint, True, id(_TEST_TRANSPORT))
+        session = _admin_read_session(key)
+        with session.lock:
+            self._validate_credentials()
+            changed = self._secret_fingerprint != fingerprint
+            if not changed:
+                usable = bool(session.csrf and session.cookies and session.expires_at > time.monotonic()
+                              and all(not cookie.is_expired() for cookie in session.cookies))
+                self._client.cookies.clear()
+                if not usable:
+                    session.clear()
+                    self._csrf = None
+                    self._login()
+                    session.csrf = self._csrf
+                    session.cookies = [copy.copy(cookie) for cookie in self._client.cookies.jar]
+                    session.expires_at = time.monotonic() + _ADMIN_READ_SESSION_TTL
+                self._csrf = session.csrf
+                for cookie in session.cookies:
+                    self._client.cookies.jar.set_cookie(copy.copy(cookie))
+                generation = session.generation
+        if changed:
+            return self._cached_read(path, params, raw, retry_auth=retry_auth)
+        try:
+            result = self._request_json("GET", path, None, params, raw)
+        except AppError as exc:
+            if exc.code not in {"ADMIN_UNAUTHENTICATED", "ADMIN_FORBIDDEN"}:
+                raise
+            with session.lock:
+                if generation == session.generation:
+                    session.clear()
+            self._csrf = None
+            self._client.cookies.clear()
+            if not usable or not retry_auth or exc.code != "ADMIN_UNAUTHENTICATED":
+                raise
+            # Only this allowlisted read is retried after stale authentication.
+            return self._cached_read(path, params, raw, retry_auth=False)
+        with session.lock:
+            if generation == session.generation:
+                session.cookies = [copy.copy(cookie) for cookie in self._client.cookies.jar]
+        return result
+
+    def _request_json(self, method: str, path: str, json_body: dict[str, Any] | None, params: dict[str, Any] | None, raw: bool) -> Any:
         if self._csrf is None:
             self._login()
         headers = {"Accept": "application/json"}
@@ -477,6 +579,8 @@ class AdminClient:
             headers["X-CSRF-Token"] = self._csrf
             headers["Origin"] = self.base_url
         response = self._request(method, path, headers=headers, json=json_body, params=params)
+        if response.is_redirect and urlsplit(response.headers.get("location", "")).path in {"/login", self._join_path("/login")}:
+            raise AppError("ADMIN_UNAUTHENTICATED", "Admin upstream rejected authentication.", 502)
         data = self._json_response(response)
         return data if raw else redact(data)
 

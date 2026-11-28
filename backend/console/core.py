@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -60,12 +61,15 @@ def bootstrap_admin(conn: sqlite3.Connection, settings: Settings) -> dict[str, A
 
 
 def login(conn: sqlite3.Connection, settings: Settings, username: str, password: str) -> dict[str, Any]:
-    if not isinstance(username, str) or not isinstance(password, str):
+    if not isinstance(username, str) or not isinstance(password, str) or len(username) > 256 or len(password) > 4096:
         raise AppError("UNAUTHENTICATED", "Invalid username or password.", 401)
     row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
         raise AppError("UNAUTHENTICATED", "Invalid username or password.", 401)
     now = utc_now()
+    absolute_expiry = _session_timestamp(_session_datetime(now) + timedelta(seconds=settings.session_absolute_ttl_seconds))
+    idle_expiry = min(_session_timestamp(_session_datetime(now) + timedelta(seconds=settings.session_ttl_seconds)), absolute_expiry)
+    conn.execute("DELETE FROM sessions WHERE revoked_at IS NOT NULL OR expires_at<=? OR absolute_expires_at<=?", (now, now))
     session_id = new_id("ses_")
     token = new_id()
     csrf_nonce = new_id("csrf_")
@@ -81,8 +85,8 @@ def login(conn: sqlite3.Connection, settings: Settings, username: str, password:
             hash_token(token),
             csrf_nonce,
             now,
-            utc_add(settings.session_ttl_seconds),
-            utc_add(settings.session_absolute_ttl_seconds),
+            idle_expiry,
+            absolute_expiry,
             now,
         ),
     )
@@ -91,11 +95,16 @@ def login(conn: sqlite3.Connection, settings: Settings, username: str, password:
         "session_id": session_id,
         "session_token": token,
         "csrf_token": csrf,
+        "expires_at": idle_expiry,
+        "absolute_expires_at": absolute_expiry,
         "user": {"id": row["id"], "username": row["username"]},
     }
 
 
-def current_user_from_token(conn: sqlite3.Connection, token: str) -> tuple[Principal, dict[str, Any]]:
+def current_user_from_token(conn: sqlite3.Connection, token: str, settings: Settings | None = None) -> tuple[Principal, dict[str, Any]]:
+    if settings is None:
+        from .config import get_settings
+        settings = get_settings()
     now = utc_now()
     row = conn.execute(
         """
@@ -111,9 +120,33 @@ def current_user_from_token(conn: sqlite3.Connection, token: str) -> tuple[Princ
     ).fetchone()
     if not row:
         raise AppError("UNAUTHENTICATED", "Session is missing or expired.", 401)
-    conn.execute("UPDATE sessions SET last_seen_at = ? WHERE id = ?", (now, row["id"]))
+    interval = min(60, max(0.1, settings.session_ttl_seconds / 2))
+    if _session_datetime(now) - _session_datetime(row["last_seen_at"]) >= timedelta(seconds=interval):
+        expires_at = min(_session_timestamp(_session_datetime(now) + timedelta(seconds=settings.session_ttl_seconds)), row["absolute_expires_at"])
+        conn.execute("""UPDATE sessions SET last_seen_at=?,expires_at=?
+            WHERE id=? AND revoked_at IS NULL AND expires_at>? AND absolute_expires_at>?
+            AND last_seen_at<=?""", (now, expires_at, row["id"], now, now, row["last_seen_at"]))
+        row = conn.execute("""SELECT sessions.*,users.username FROM sessions JOIN users ON users.id=sessions.user_id
+            WHERE sessions.id=? AND revoked_at IS NULL AND expires_at>? AND absolute_expires_at>?""", (row["id"], now, now)).fetchone()
+        if not row:
+            raise AppError("UNAUTHENTICATED", "Session is missing or expired.", 401)
     principal = Principal(id=row["user_id"], username=row["username"])
     return principal, dict(row)
+
+
+def _session_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _session_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def session_cookie_max_age(session: dict[str, Any]) -> int:
+    # The server enforces idle expiry. A single absolute-lifetime cookie avoids
+    # late authenticated responses restoring an older token after login/logout.
+    expiry = session["absolute_expires_at"]
+    return max(0, int((_session_datetime(expiry) - _session_datetime(utc_now())).total_seconds()))
 
 
 def logout(conn: sqlite3.Connection, session_id: str) -> None:

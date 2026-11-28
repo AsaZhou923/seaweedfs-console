@@ -59,6 +59,10 @@ Open **http://127.0.0.1:18765** and sign in as `admin` with the password you con
 
 The administrator password is stored as a hash on first startup. Changing the environment variable later does not reset an existing account.
 
+Sessions have an 8-hour idle timeout (`CONSOLE_SESSION_TTL_SECONDS`) and a 24-hour absolute lifetime (`CONSOLE_SESSION_ABSOLUTE_TTL_SECONDS`) by default. The server refreshes active sessions at intervals of up to one minute. Sign in again after expiry. Login admits up to 5 attempts per direct peer and 30 in total per 60-second window. HTTP 429 includes a `Retry-After` header. The bundled launcher uses the TCP peer address, so users behind the same proxy share a peer limit.
+
+Cursor and CSRF tokens use independent random keys. On first use, the console creates `cursor-signing.key` and `csrf-signing.key` in `CONSOLE_DATA_DIR`. To supply the keys yourself, set separate values in `CONSOLE_CURSOR_SIGNING_KEY` and `CONSOLE_CSRF_SIGNING_KEY` for both the API and the worker. When upgrading from password-derived keys, reload the page to fetch a new CSRF token and restart any paginated listing.
+
 ### 3. Connect your services
 
 1. Open **Settings** and create a Management Connection using your registered Admin credential reference.
@@ -189,6 +193,8 @@ Package verification checks the archive, manifest, required files, relative docu
 ```
 
 Backup and restore destinations must be new paths. The helper uses SQLite's backup API and verifies integrity and foreign keys. Stop the API and worker before activating a restored database, then set `CONSOLE_DATA_DIR` to the restored directory and restart. Back up credentials and environment configuration separately.
+
+Back up both signing-key files privately alongside the database if existing tokens must survive a restore. Restore them into the active data directory before starting either process, or restore the matching explicit overrides. Replacing one key and restarting the API and worker invalidates tokens signed for that purpose.
 
 This backs up console state, not S3 objects or Filer metadata.
 

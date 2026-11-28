@@ -27,6 +27,7 @@ from .security import AppError, current_user, mutation, sign_json, unsign_json, 
 router = APIRouter(prefix="/api/v1")
 MAX_READ = 32 * 1024 * 1024
 MAX_PAGE = 200
+DEFAULT_SCAN_PAGE_SIZE = 1000
 FILTER_NAMES = {"prefix", "query", "format", "decode_status", "tag", "min_width", "max_width", "min_height", "max_height", "min_size", "max_size", "min_ratio", "max_ratio", "after", "before", "presence"}
 MAX_TAGS = 50
 MAX_TAG_LENGTH = 128
@@ -441,19 +442,38 @@ def _scan(job, settings, scope, s3, params, progress):
     position = int(progress.get("position", 0))
     processed, errors = job["processed"], job["errors"]
     maximum = int(params.get("max_objects", 100000))
-    page_size = max(1, min(1000, int(params.get("page_size", params.get("list_max_keys", 1)))))
+    page_size = max(1, min(1000, int(params.get("page_size", params.get("list_max_keys", DEFAULT_SCAN_PAGE_SIZE)))))
     rate = float(params.get("objects_per_second", 20))
     if progress.get("phase") == "confirm_missing":
         _confirm_missing_and_finish(job, settings, s3, params, rate, processed, errors, progress.get("last_candidate", ""))
         return
+    if page is not None or progress.get("page_stored"):
+        with db.connect(settings) as conn:
+            current = jobs.fenced(conn, job)
+            _scope_for_job(conn, job, params)
+            if page is None:
+                saved = conn.execute("SELECT page_json FROM scan_listing_pages WHERE job_id=?", (job["id"],)).fetchone()
+                if saved is None:
+                    raise AppError("SCAN_CHECKPOINT_INVALID", "Stored scan listing is unavailable.", 409)
+                page = json.loads(saved["page_json"])
+            else:
+                # Older jobs embedded the listing in checkpoint_json.
+                conn.execute("INSERT OR REPLACE INTO scan_listing_pages(job_id,page_json) VALUES(?,?)", (job["id"], json.dumps(page)))
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": True, "position": position})
+                if current["pause_requested_at"] or current["cancel_requested_at"]:
+                    return
     while True:
         with db.connect(settings) as conn:
             current = jobs.fenced(conn, job)
             scope = _scope_for_job(conn, job, params)
             if current["pause_requested_at"] or current["cancel_requested_at"]:
-                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": page is not None, "position": position})
                 return
-        if page is None or position >= len(page):
+        if page is None and processed >= maximum:
+            with db.connect(settings) as conn:
+                jobs.checkpoint(conn, job, state="failed", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": page is not None, "position": position}, error_code="SCAN_BUDGET_EXHAUSTED")
+            return
+        if page is None:
             kwargs = {"Bucket": scope["bucket"], "Prefix": scope["prefix"], "MaxKeys": min(page_size, max(1, maximum - processed))}
             if token:
                 kwargs["ContinuationToken"] = token
@@ -461,16 +481,21 @@ def _scan(job, settings, scope, s3, params, progress):
                 listed_page = s3.list_objects_v2(**kwargs)
             except Exception as exc:
                 raise storage.sanitize_storage_exception(exc) from exc
-            page = [_checkpoint_listing(item) for item in listed_page.get("Contents", [])]
             next_token = listed_page.get("NextContinuationToken") if listed_page.get("IsTruncated") else None
+            if listed_page.get("IsTruncated") and (not isinstance(next_token, str) or not next_token or next_token == token):
+                raise AppError("SCAN_PAGINATION_INVALID", "Truncated scan listing did not advance its continuation token.", 502)
+            page = [_checkpoint_listing(item) for item in listed_page.get("Contents", [])]
             position = 0
             with db.connect(settings) as conn:
-                jobs.fenced(conn, job)
+                current = jobs.fenced(conn, job)
                 _scope_for_job(conn, job, params)
-                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
+                conn.execute("INSERT OR REPLACE INTO scan_listing_pages(job_id,page_json) VALUES(?,?)", (job["id"], json.dumps(page)))
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": True, "position": position})
+                if current["pause_requested_at"] or current["cancel_requested_at"]:
+                    return
             if not page and not next_token:
                 break
-        while position < len(page):
+        while position < len(page) and processed < maximum:
             listed = page[position]
             started = time.monotonic()
             key = listed["key"]
@@ -479,10 +504,10 @@ def _scan(job, settings, scope, s3, params, progress):
                 current = jobs.fenced(conn, job)
                 scope = _scope_for_job(conn, job, params)
                 if current["pause_requested_at"] or current["cancel_requested_at"]:
-                    jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
+                    jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": True, "position": position})
                     return
                 # Refresh the lease before bounded network/decode work.
-                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": True, "position": position})
             props, err, obs = {}, None, None
             try:
                 head = s3.head_object(Bucket=scope["bucket"], Key=key)
@@ -500,7 +525,7 @@ def _scan(job, settings, scope, s3, params, progress):
                 obs = obs if obs is not None else dict(listed)
                 props = {"decode_status": "resource_limited" if err == "RESOURCE_LIMIT_EXCEEDED" else "read_failed", "error_code": err}
             with db.connect(settings) as conn:
-                jobs.fenced(conn, job)
+                current = jobs.fenced(conn, job)
                 scope = _scope_for_job(conn, job, params)
                 obj = core.upsert_object(conn, scope["id"], obs | {"properties": props, "scan_id": job["id"]})
                 processed += 1
@@ -509,20 +534,28 @@ def _scan(job, settings, scope, s3, params, progress):
                 if err:
                     conn.execute("INSERT INTO job_items(job_id,object_id,state,error_code,created_at) VALUES(?,?,?,?,?)",
                                  (job["id"], obj["id"], "failed", err, jobs.now()))
-                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page": page, "position": position})
+                jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": True, "position": position})
+                if current["pause_requested_at"] or current["cancel_requested_at"]:
+                    return
             _rate_wait(rate, started)
-        if processed >= maximum and next_token:
+        if processed >= maximum and (position < len(page) or next_token):
             with db.connect(settings) as conn:
-                jobs.checkpoint(conn, job, state="failed", processed=processed, errors=errors, data={"token": next_token, "next_token": None, "page": None, "position": 0}, error_code="SCAN_BUDGET_EXHAUSTED")
+                jobs.checkpoint(conn, job, state="failed", processed=processed, errors=errors, data={"token": token, "next_token": next_token, "page_stored": True, "position": position}, error_code="SCAN_BUDGET_EXHAUSTED")
             return
         if next_token:
             token = next_token
             next_token, page, position = None, None, 0
             with db.connect(settings) as conn:
+                jobs.fenced(conn, job)
+                conn.execute("DELETE FROM scan_listing_pages WHERE job_id=?", (job["id"],))
                 jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"token": token, "next_token": None, "page": None, "position": 0})
             continue
         page, position = None, 0
         break
+    with db.connect(settings) as conn:
+        jobs.fenced(conn, job)
+        conn.execute("DELETE FROM scan_listing_pages WHERE job_id=?", (job["id"],))
+        jobs.checkpoint(conn, job, state="running", processed=processed, errors=errors, data={"phase": "confirm_missing", "last_candidate": ""})
     _confirm_missing_and_finish(job, settings, s3, params, rate, processed, errors, "")
 
 
@@ -817,6 +850,10 @@ def scan(request: Request, scope_id: str, body: dict):
     max_objects = _int_param(body.get("max_objects"), "max_objects", 100000, minimum=1, maximum=1000000)
     rate = _float_param(body.get("objects_per_second"), "objects_per_second", 20, minimum=0, maximum=100)
     params = {"authz_epoch": scope["authz_epoch"], "max_objects": max_objects, "objects_per_second": rate}
+    if body.get("page_size") is not None:
+        if type(body["page_size"]) is not int:
+            raise AppError("INVALID_FILTER", "page_size must be an integer", 422, field="page_size")
+        params["page_size"] = _int_param(body["page_size"], "page_size", DEFAULT_SCAN_PAGE_SIZE, minimum=1, maximum=1000)
     with db.connect(request.app.state.settings) as conn:
         try:
             return jobs.submit_job(conn, scope_id, "scan", params, actor=user.id, idempotency_key=request.headers.get("Idempotency-Key"))
@@ -868,12 +905,12 @@ def preview(request: Request, scope_id: str, object_id: str):
         raise AppError("FORBIDDEN_SCOPE", "此范围未授权预览", 403)
     with db.connect(request.app.state.settings) as conn:
         obj = core.get_object(conn, scope_id, object_id)
-        s3 = s3_for(conn, scope, request.app.state.settings)
+        connection = core._connection_private(conn, scope["connection_id"])
     try:
         kwargs = {"Bucket": scope["bucket"], "Key": obj["key"]}
         if obj.get("version_id") and obj["version_id"] != "null":
             kwargs["VersionId"] = obj["version_id"]
-        head = s3.head_object(**kwargs)
+        head = storage.head_object(connection, request.app.state.settings, **kwargs)
         if core.make_revision(scope["bucket"], obj["key"], observation(obj["key"], head)) != obj["revision"]:
             raise AppError("OBJECT_REVISION_CHANGED", "源对象已改变，请重新扫描", 409)
     except AppError:

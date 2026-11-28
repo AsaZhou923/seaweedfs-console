@@ -690,3 +690,9 @@ W01 继续为 WATCH：当前 foundation 只有 schema_migrations(version, applie
 - **#32.** Mocked Chromium cases open nested Filer directories and literal S3 prefixes through the sidebar, copied links, refresh and browser history. They check authorized parents, overlapping Scopes, invalid targets and delayed responses. The prior frontend opened a copied nested Filer location at the root.
 - **#51.** Tests cover latest data versions and delete markers, empty versus missing versioning, endpoint health wording, operation targets and redaction. Browser checks scroll populated history and service-account tables to their last column at desktop and mobile widths. The prior frontend displayed the Chinese unknown label for an observed empty versioning status in English.
 - Claude's first review found that switching connections could restore an old directory, and Settings could return to a stale Scope after setup. Follow-up browser cases cover both flows, copying an address after switching connections, and conflicting or missing health evidence on the Services page.
+
+## 2026-11-28 · Session handling and repeated storage requests
+
+- **#38.** Tests cover independent persistent cursor and CSRF keys, simultaneous startup, bounded login admission and cookie expiry. Controlled-clock cases verify idle renewal, absolute expiry, revocation and coalesced writes.
+- **#40.** The 33-object scan fixture returns at most 16 keys per response. With the default request size, the scan completes in three list calls and persists each page once. Checkpoint tests cover pause, cancellation, retry boundaries and recovery of older jobs.
+- Sixty preview reads against the synthetic S3 adapter construct one client and still perform 60 revision HEADs. Five read-only Admin projections perform one login handshake. A 200-row job poll authenticates once and opens at most two SQLite connections. These checks count operations on controlled fixtures.

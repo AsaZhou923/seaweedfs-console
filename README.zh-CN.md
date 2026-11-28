@@ -59,6 +59,10 @@ pwsh -NoProfile -File scripts/start.ps1 -Install
 
 管理员密码在首次启动时以哈希保存。之后更改环境变量不会重置已有账户。
 
+会话默认空闲 8 小时过期（`CONSOLE_SESSION_TTL_SECONDS`），绝对期限为 24 小时（`CONSOLE_SESSION_ABSOLUTE_TTL_SECONDS`）。服务端以最长一分钟的间隔延长活动会话的空闲期限，到期后需要重新登录。每 60 秒内，每个直连地址最多受理 5 次登录尝试，所有地址合计最多 30 次。HTTP 429 的 `Retry-After` 响应头给出等待秒数。自带启动脚本使用 TCP 对端地址，因此同一反向代理后的用户共享地址限额。
+
+游标和 CSRF 令牌使用独立的随机签名密钥。首次使用时，控制台会在 `CONSOLE_DATA_DIR` 中创建 `cursor-signing.key` 和 `csrf-signing.key`。也可分别设置 `CONSOLE_CURSOR_SIGNING_KEY` 和 `CONSOLE_CSRF_SIGNING_KEY`，API 和 worker 需使用相同配置。从使用管理员密码签名的旧版升级后，刷新页面以获取新的 CSRF 令牌，并从第一页重新浏览。
+
 ### 3. 接入服务
 
 1. 在 **Settings** 创建 Management Connection，使用已注册的 Admin 凭据引用。
@@ -189,6 +193,8 @@ rtk proxy .venv\Scripts\python.exe scripts/e2e_live_fixture.py serve --directory
 ```
 
 备份和恢复目标必须是新路径。工具使用 SQLite backup API，并验证完整性和外键。启用恢复后的数据库前，先停止 API 和 worker，将 `CONSOLE_DATA_DIR` 指向恢复目录后再启动。凭据与环境配置需单独备份。
+
+如需在恢复后保留现有令牌，请单独安全备份两份签名密钥文件，并在启动 API 和 worker 前将其恢复到数据目录；使用环境变量的部署则恢复原先对应的密钥。替换其中一个密钥并重启两个进程后，该用途的旧令牌失效。
 
 这只备份控制台状态，不备份 S3 对象或 Filer 元数据。
 

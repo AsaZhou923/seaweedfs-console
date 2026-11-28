@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS login_admission_windows (
+  peer_hash TEXT PRIMARY KEY,
+  started_at REAL NOT NULL,
+  attempts INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_admission_leases (
+  id TEXT PRIMARY KEY,
+  expires_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS storage_connections (
   id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,

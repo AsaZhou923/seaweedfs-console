@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from . import batch_operations, catalog, core, db, enhancements, jobs, management, management_conditions, management_grpc, management_native, management_objects, management_ops, management_resources, storage, table_preview
 from .config import Settings, get_settings, load_secret_registry
 from .request_validation import required_string
+from .login_admission import admit as admit_login
 from .security import AppError, current_user, mutation, validate_origin
 
 
@@ -42,7 +43,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(AppError)
     async def app_error(request, exc):
-        return JSONResponse(exc.to_response(getattr(request.state, "request_id", None)), status_code=exc.status)
+        headers = {"Retry-After": str(exc.detail["retry_after"])} if exc.code == "LOGIN_RATE_LIMITED" else None
+        return JSONResponse(exc.to_response(getattr(request.state, "request_id", None)), status_code=exc.status, headers=headers)
 
     @app.exception_handler(storage.StorageError)
     async def storage_error(request, exc):
@@ -72,17 +74,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             validate_origin(request.headers.get("origin"), settings, str(request.base_url).rstrip("/"))
         except PermissionError:
             raise AppError("FORBIDDEN_ORIGIN", "请求来源不受信任", 403)
-        with db.connect(settings) as conn:
-            result = core.login(conn, settings, body.get("username", ""), body.get("password", ""))
-            previous = request.cookies.get(settings.session_cookie_name)
-            if previous:
-                try:
-                    _, session = core.current_user_from_token(conn, previous)
-                    core.logout(conn, session["id"])
-                except AppError:
-                    pass
+        with admit_login(settings, request.client.host if request.client else "unknown"):
+            with db.connect(settings) as conn:
+                result = core.login(conn, settings, body.get("username", ""), body.get("password", ""))
+                previous = request.cookies.get(settings.session_cookie_name)
+                if previous:
+                    try:
+                        _, session = core.current_user_from_token(conn, previous, settings)
+                        core.logout(conn, session["id"])
+                    except AppError:
+                        pass
         response.set_cookie(settings.session_cookie_name, result["session_token"], httponly=True,
-                            secure=settings.effective_cookie_secure, samesite="lax", max_age=settings.session_ttl_seconds)
+                            secure=settings.effective_cookie_secure, samesite="lax", max_age=core.session_cookie_max_age(result))
         return {"user": result["user"], "csrf_token": result["csrf_token"]}
 
     @app.get("/api/v1/auth/me")

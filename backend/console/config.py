@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 
@@ -48,10 +53,20 @@ class Settings:
         return self.admin_password
 
     def require_cursor_key(self) -> bytes:
-        return (self.cursor_signing_key or self.require_admin_password()).encode("utf-8")
+        return self.cursor_signing_key.encode("utf-8") if self.cursor_signing_key else self._default_cursor_key
 
     def require_csrf_key(self) -> bytes:
-        return (self.csrf_signing_key or self.require_admin_password()).encode("utf-8")
+        return self.csrf_signing_key.encode("utf-8") if self.csrf_signing_key else self._default_csrf_key
+
+    @cached_property
+    def _default_cursor_key(self) -> bytes:
+        from .signing_keys import persistent_key
+        return persistent_key(self.data_dir, "cursor")
+
+    @cached_property
+    def _default_csrf_key(self) -> bytes:
+        from .signing_keys import persistent_key
+        return persistent_key(self.data_dir, "csrf")
 
 
 def get_settings() -> Settings:
@@ -80,13 +95,35 @@ def get_settings() -> Settings:
     )
 
 
+_SECRET_REGISTRY_CACHE: OrderedDict[str, tuple[bytes, dict[str, Any]]] = OrderedDict()
+_SECRET_REGISTRY_LOCK = RLock()
+_SECRET_REGISTRY_CACHE_LIMIT = 8
+
+
 def load_secret_registry(settings: Settings) -> dict[str, Any]:
     if settings.secrets_file is None:
         return {}
-    with settings.secrets_file.open("r", encoding="utf-8") as fh:
-        raw = json.load(fh)
-    if isinstance(raw, dict) and "secrets" in raw and isinstance(raw["secrets"], dict):
-        return raw["secrets"]
-    if isinstance(raw, dict):
-        return raw
-    raise ValueError("Secret registry must be a JSON object")
+    # Read every time: file metadata alone cannot prove credentials are unchanged.
+    path = str(settings.secrets_file.absolute())
+    try:
+        content = settings.secrets_file.read_bytes()
+    except OSError:
+        with _SECRET_REGISTRY_LOCK:
+            _SECRET_REGISTRY_CACHE.pop(path, None)
+        raise
+    digest = hashlib.sha256(content).digest()
+    with _SECRET_REGISTRY_LOCK:
+        cached = _SECRET_REGISTRY_CACHE.get(path)
+        if cached is not None and cached[0] == digest:
+            _SECRET_REGISTRY_CACHE.move_to_end(path)
+            return deepcopy(cached[1])
+        _SECRET_REGISTRY_CACHE.pop(path, None)
+        raw = json.loads(content.decode("utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("Secret registry must be a JSON object")
+        registry = raw["secrets"] if isinstance(raw.get("secrets"), dict) else raw
+        _SECRET_REGISTRY_CACHE[path] = (digest, registry)
+        _SECRET_REGISTRY_CACHE.move_to_end(path)
+        while len(_SECRET_REGISTRY_CACHE) > _SECRET_REGISTRY_CACHE_LIMIT:
+            _SECRET_REGISTRY_CACHE.popitem(last=False)
+        return deepcopy(registry)
