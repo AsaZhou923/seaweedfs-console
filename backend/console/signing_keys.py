@@ -1,6 +1,7 @@
 """Persist independent token-signing keys without publishing partial files."""
 
 import csv
+import ctypes
 import os
 from pathlib import Path
 import secrets
@@ -14,9 +15,14 @@ def _restrict_file(path: Path) -> None:
         return
     options = {"capture_output": True, "text": True, "check": True,
                "creationflags": subprocess.CREATE_NO_WINDOW}
-    identity = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], **options)
+    system_directory = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(system_directory, len(system_directory))
+    if not 0 < length < len(system_directory):
+        raise OSError("Cannot locate the Windows system directory")
+    system_directory = Path(system_directory.value)
+    identity = subprocess.run([str(system_directory / "whoami.exe"), "/user", "/fo", "csv", "/nh"], **options)
     sid = next(csv.reader(identity.stdout.splitlines()))[1]
-    subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F", "*S-1-5-18:F"], **options)
+    subprocess.run([str(system_directory / "icacls.exe"), str(path), "/inheritance:r", "/grant:r", f"*{sid}:F", "*S-1-5-18:F"], **options)
 
 
 def persistent_key(data_dir: Path, purpose: str) -> bytes:

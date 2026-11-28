@@ -3,6 +3,7 @@ type Message = { en: string; "zh-CN": string };
 export const apiMessages: Record<string, Message> = {
   "Too many login attempts. Try again later.": { en: "Too many login attempts. Try again later.", "zh-CN": "登录尝试过多，请稍后重试。" },
   "Storage credentials changed before dispatch.": { en: "Storage credentials changed before the request was sent.", "zh-CN": "发送请求前存储凭据发生了变化。" },
+  "Admin credentials changed during this read. Retry the read.": { en: "Admin credentials changed during this read. Retry the read.", "zh-CN": "读取期间管理凭据发生了变化，请重新读取。" },
   "Stored scan listing is unavailable.": { en: "The saved listing for this scan is unavailable.", "zh-CN": "无法读取此扫描保存的对象列表。" },
   "Truncated scan listing did not advance its continuation token.": { en: "Storage reported more objects but did not provide a new continuation token.", "zh-CN": "存储服务报告还有更多对象，但未提供新的分页令牌。" },
   "User was not found.": { en: "User was not found.", "zh-CN": "找不到该用户。" },

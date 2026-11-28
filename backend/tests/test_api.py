@@ -214,7 +214,8 @@ def test_scan_page_size_is_persisted_for_worker(api, page_size):
     assert response.status_code == 200, response.text
     with db.connect(app.state.settings) as conn:
         params = json.loads(conn.execute("SELECT params_json FROM jobs WHERE id=?", (response.json()["id"],)).fetchone()[0])
-    assert params["page_size"] == page_size
+    assert params.get("page_size", 1000) == page_size
+    assert ("page_size" in params) is (page_size != 1000)
 
 
 def test_scan_default_page_size_preserves_legacy_request_replay(api):
@@ -227,10 +228,29 @@ def test_scan_default_page_size_preserves_legacy_request_replay(api):
         legacy = jobs.submit_job(conn, scope_id, "scan", {
             "authz_epoch": epoch, "max_objects": 100000, "objects_per_second": 20.0,
         }, actor=actor, idempotency_key="legacy-scan")
-    for body in ({}, {"page_size": None}):
+    for body in ({}, {"page_size": None}, {"page_size": 1000}):
         response = client.post(f"/api/v1/scopes/{scope_id}/scans", json=body, headers={**authed_headers(csrf), "Idempotency-Key": "legacy-scan"})
         assert response.status_code == 200, response.text
         assert response.json()["id"] == legacy["id"]
+    with db.connect(app.state.settings) as conn:
+        assert conn.execute("SELECT count(*) FROM jobs WHERE scope_id=?", (scope_id,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("first, equivalent", [({}, {"page_size": 1000}), ({"page_size": 1000}, {})])
+def test_scan_equivalent_default_page_sizes_replay_in_both_directions(api, first, equivalent):
+    client, app, _fake = api
+    csrf = login(client)
+    _, _, scope_id = create_scope(client, csrf)
+    url = f"/api/v1/scopes/{scope_id}/scans"
+    headers = {**authed_headers(csrf), "Idempotency-Key": "equivalent-page-size"}
+    created = client.post(url, json=first, headers=headers)
+    assert created.status_code == 200, created.text
+    replay = client.post(url, json=equivalent, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["id"] == created.json()["id"]
+    conflict = client.post(url, json={"page_size": 25}, headers=headers)
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     with db.connect(app.state.settings) as conn:
         assert conn.execute("SELECT count(*) FROM jobs WHERE scope_id=?", (scope_id,)).fetchone()[0] == 1
 

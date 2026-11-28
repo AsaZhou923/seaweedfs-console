@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
@@ -527,12 +528,27 @@ class AdminClient:
         self.secret = secret
         self._secret_fingerprint = fingerprint
 
-    def _cached_read(self, path: str, params: dict[str, Any] | None, raw: bool, *, retry_auth: bool = True) -> Any:
+    @contextmanager
+    def _read_session_lock(self, session: _AdminReadSession):
+        deadline = getattr(self, "_deadline_monotonic", None)
+        if deadline is None:
+            acquired = session.lock.acquire()
+        else:
+            remaining = deadline - time.monotonic()
+            acquired = remaining > 0 and session.lock.acquire(timeout=remaining)
+        if not acquired:
+            raise AppError("ADMIN_TIMEOUT", "Admin request budget expired.", 504)
+        try:
+            yield
+        finally:
+            session.lock.release()
+
+    def _cached_read(self, path: str, params: dict[str, Any] | None, raw: bool, *, retry_auth: bool = True, rotations_left: int = 2) -> Any:
         fingerprint = self._secret_fingerprint
         key = (str(self.settings.database_path.resolve()), str(self.settings.secrets_file.resolve()),
                self.management.get("id"), self.endpoint_url, fingerprint, True, id(_TEST_TRANSPORT))
         session = _admin_read_session(key)
-        with session.lock:
+        with self._read_session_lock(session):
             self._validate_credentials()
             changed = self._secret_fingerprint != fingerprint
             if not changed:
@@ -551,22 +567,24 @@ class AdminClient:
                     self._client.cookies.jar.set_cookie(copy.copy(cookie))
                 generation = session.generation
         if changed:
-            return self._cached_read(path, params, raw, retry_auth=retry_auth)
+            if rotations_left == 0:
+                raise AppError("ADMIN_SECRET_CHANGED", "Admin credentials changed during this read. Retry the read.", 503, retryable=True)
+            return self._cached_read(path, params, raw, retry_auth=retry_auth, rotations_left=rotations_left - 1)
         try:
             result = self._request_json("GET", path, None, params, raw)
         except AppError as exc:
-            if exc.code not in {"ADMIN_UNAUTHENTICATED", "ADMIN_FORBIDDEN"}:
+            if exc.code != "ADMIN_UNAUTHENTICATED":
                 raise
-            with session.lock:
+            with self._read_session_lock(session):
                 if generation == session.generation:
                     session.clear()
             self._csrf = None
             self._client.cookies.clear()
-            if not usable or not retry_auth or exc.code != "ADMIN_UNAUTHENTICATED":
+            if not usable or not retry_auth:
                 raise
             # Only this allowlisted read is retried after stale authentication.
-            return self._cached_read(path, params, raw, retry_auth=False)
-        with session.lock:
+            return self._cached_read(path, params, raw, retry_auth=False, rotations_left=rotations_left)
+        with self._read_session_lock(session):
             if generation == session.generation:
                 session.cookies = [copy.copy(cookie) for cookie in self._client.cookies.jar]
         return result

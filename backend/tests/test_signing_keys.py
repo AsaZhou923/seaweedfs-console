@@ -45,6 +45,35 @@ def test_explicit_keys_and_environment_overrides_need_no_key_files(tmp_path, mon
     assert not list(tmp_path.glob("*.key"))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows system utility lookup")
+def test_windows_acl_uses_system_executables(tmp_path, monkeypatch):
+    calls = []
+
+    def run(command, **_options):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, '"user","S-1-5-21-123"\n')
+
+    monkeypatch.setattr(signing_keys.subprocess, "run", run)
+    signing_keys._restrict_file(tmp_path / "candidate.key")
+    executables = [Path(command[0]) for command in calls]
+    assert [path.name for path in executables] == ["whoami.exe", "icacls.exe"]
+    assert all(path.is_absolute() and path.is_file() for path in executables)
+    assert executables[0].parent == executables[1].parent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows system utility lookup")
+def test_windows_system_directory_lookup_failure_never_dispatches(tmp_path, monkeypatch):
+    monkeypatch.setattr(signing_keys.ctypes.windll.kernel32, "GetSystemDirectoryW", lambda *_args: 0)
+
+    def unexpected_run(*_args, **_kwargs):
+        pytest.fail("ACL command must not run without a trusted system directory")
+
+    monkeypatch.setattr(signing_keys.subprocess, "run", unexpected_run)
+    with pytest.raises(RuntimeError, match="Cannot initialize or read cursor signing key"):
+        settings(tmp_path).require_cursor_key()
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("content", [b"", b"password", b"a" * 63, b"a" * 65, b"z" * 64])
 def test_malformed_existing_keys_fail_without_replacement(tmp_path, content):
     target = tmp_path / "cursor-signing.key"

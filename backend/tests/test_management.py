@@ -358,6 +358,72 @@ def test_unsupported_projection_keeps_authenticated_session_without_retries(read
     assert sum(request.url.path == "/api/admin" for request in admin.session_requests) == 2
 
 
+def test_forbidden_projection_retains_session_without_login_or_read_retries(read_sessions):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    url = f"/api/v1/management/{connection['id']}/overview"
+    assert client.get(url).status_code == 200
+    admin.mode = "forbidden"
+    for _ in range(2):
+        response = client.get(url)
+        assert response.status_code == 200, response.text
+        assert response.json()["modules"] == {"admin": "permission_denied", "config": "permission_denied"}
+    assert admin.handshakes == 1
+    assert sum(request.url.path == "/api/admin" for request in admin.session_requests) == 3
+    assert sum(request.url.path == "/api/config" for request in admin.session_requests) == 3
+    admin.mode = "ok"
+    assert client.get(url).json()["admin"]["username"] == "admin"
+    assert admin.handshakes == 1
+
+
+def test_projection_waiting_for_session_lock_honors_request_deadline(read_sessions):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    assert client.get(f"/api/v1/management/{connection['id']}/overview").status_code == 200
+    entry = next(iter(management._ADMIN_READ_SESSIONS.values()))
+    before = len(admin.session_requests)
+
+    def read():
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                upstream._deadline_monotonic = time.monotonic() + .1
+                return upstream.get_json("/api/admin")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        entry.lock.acquire()
+        try:
+            future = pool.submit(read)
+            with pytest.raises(AppError) as caught:
+                future.result(timeout=2)
+            assert caught.value.code == "ADMIN_TIMEOUT" and caught.value.status == 504
+        finally:
+            entry.lock.release()
+    assert len(admin.session_requests) == before
+
+
+def test_projection_continuous_credential_rotation_fails_with_bounded_typed_error(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    calls = 0
+    original = management._admin_secret
+
+    def rotating_secret(*args):
+        nonlocal calls
+        secret = dict(original(*args))
+        calls += 1
+        secret["password"] = f"rotation-{calls}"
+        return secret
+
+    monkeypatch.setattr(management, "_admin_secret", rotating_secret)
+    with db.connect(settings) as conn:
+        with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+            with pytest.raises(AppError) as caught:
+                upstream.get_json("/api/admin")
+    assert caught.value.code == "ADMIN_SECRET_CHANGED" and caught.value.status == 503
+    assert calls == 5
+    assert admin.session_requests == []
+
+
 def test_projection_session_isolated_by_connection_endpoint_and_prefix(read_sessions):
     client, _settings, csrf, admin = read_sessions
     bodies = [

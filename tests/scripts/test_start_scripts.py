@@ -160,6 +160,7 @@ public class MockConsoleProcess {{
             [pscustomobject]@{{
                 error = $taskError
                 started = $script:started.Count
+                apiArguments = $script:started[0]
                 stopped = $script:stopped
                 recordExists = (Test-Path -LiteralPath '{(root / "output" / "processes.json").as_posix()}')
             }} | ConvertTo-Json -Compress
@@ -254,5 +255,7 @@ def test_start_success_writes_pid_record_without_cleanup(tmp_path: Path):
 
     assert result["error"] is None
     assert result["started"] == 2
+    assert result["apiArguments"][:2] == ["-m", "uvicorn"]
+    assert "--no-proxy-headers" in result["apiArguments"]
     assert stopped_set(result) == set()
     assert result["recordExists"] is True

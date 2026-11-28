@@ -59,7 +59,9 @@ pwsh -NoProfile -File scripts/start.ps1 -Install
 
 管理员密码在首次启动时以哈希保存。之后更改环境变量不会重置已有账户。
 
-会话默认空闲 8 小时过期（`CONSOLE_SESSION_TTL_SECONDS`），绝对期限为 24 小时（`CONSOLE_SESSION_ABSOLUTE_TTL_SECONDS`）。服务端以最长一分钟的间隔延长活动会话的空闲期限，到期后需要重新登录。每 60 秒内，每个直连地址最多受理 5 次登录尝试，所有地址合计最多 30 次。HTTP 429 的 `Retry-After` 响应头给出等待秒数。自带启动脚本使用 TCP 对端地址，因此同一反向代理后的用户共享地址限额。
+会话默认空闲 8 小时过期（`CONSOLE_SESSION_TTL_SECONDS`），绝对期限为 24 小时（`CONSOLE_SESSION_ABSOLUTE_TTL_SECONDS`）。服务端以最长一分钟的间隔延长活动会话的空闲期限，到期后需要重新登录。
+
+每 60 秒内，每个直连地址最多受理 5 次登录尝试，所有地址合计最多 30 次，成功登录也计数。各 API 进程共享两个密码校验名额，异常中断占用的名额会在 30 秒后释放。达到限额时，HTTP 429 的 `Retry-After` 响应头给出等待秒数。自带启动脚本使用 TCP 对端地址，因此同一反向代理后的用户共享地址限额。登录限流期间，现有会话仍可使用。
 
 游标和 CSRF 令牌使用独立的随机签名密钥。首次使用时，控制台会在 `CONSOLE_DATA_DIR` 中创建 `cursor-signing.key` 和 `csrf-signing.key`。也可分别设置 `CONSOLE_CURSOR_SIGNING_KEY` 和 `CONSOLE_CSRF_SIGNING_KEY`，API 和 worker 需使用相同配置。从使用管理员密码签名的旧版升级后，刷新页面以获取新的 CSRF 令牌，并从第一页重新浏览。
 

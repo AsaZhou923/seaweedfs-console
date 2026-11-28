@@ -853,7 +853,9 @@ def scan(request: Request, scope_id: str, body: dict):
     if body.get("page_size") is not None:
         if type(body["page_size"]) is not int:
             raise AppError("INVALID_FILTER", "page_size must be an integer", 422, field="page_size")
-        params["page_size"] = _int_param(body["page_size"], "page_size", DEFAULT_SCAN_PAGE_SIZE, minimum=1, maximum=1000)
+        page_size = _int_param(body["page_size"], "page_size", DEFAULT_SCAN_PAGE_SIZE, minimum=1, maximum=1000)
+        if page_size != DEFAULT_SCAN_PAGE_SIZE:
+            params["page_size"] = page_size
     with db.connect(request.app.state.settings) as conn:
         try:
             return jobs.submit_job(conn, scope_id, "scan", params, actor=user.id, idempotency_key=request.headers.get("Idempotency-Key"))
