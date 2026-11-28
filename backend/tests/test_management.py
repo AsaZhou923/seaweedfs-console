@@ -401,6 +401,36 @@ def test_projection_waiting_for_session_lock_honors_request_deadline(read_sessio
     assert len(admin.session_requests) == before
 
 
+def test_normal_volume_read_times_out_behind_cold_login_without_dispatch(read_sessions, monkeypatch):
+    client, _settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    entered, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(management, "_ADMIN_REQUEST_TIMEOUT", .05)
+
+    def held_login(request):
+        if request.method == "GET" and request.url.path == "/login":
+            entered.set()
+            assert release.wait(5), "cold login was not released"
+        return admin(request)
+
+    monkeypatch.setattr(management, "_TEST_TRANSPORT", httpx.MockTransport(held_login))
+    url = f"/api/v1/management/{connection['id']}/volumes?limit=6"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        leader = pool.submit(client.get, url)
+        try:
+            assert entered.wait(2)
+            follower = pool.submit(client.get, url).result(timeout=2)
+            assert follower.status_code == 200, follower.text
+            assert follower.json()["module_status"] == "unreachable"
+            assert follower.json()["evidence"]["error_code"] == "ADMIN_TIMEOUT"
+            assert admin.session_requests == [], "waiting follower dispatched a remote call"
+        finally:
+            release.set()
+        assert leader.result(timeout=2).status_code == 200
+    assert admin.handshakes == 1
+    assert sum(request.url.path == "/api/volumes/export" for request in admin.session_requests) == 1
+
+
 def test_projection_continuous_credential_rotation_fails_with_bounded_typed_error(read_sessions, monkeypatch):
     client, settings, csrf, admin = read_sessions
     connection = create_connection(client, csrf)

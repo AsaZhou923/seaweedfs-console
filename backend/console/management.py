@@ -29,6 +29,7 @@ SOURCE_SHA = "530be3e37337488ecc34d58441e0bc476e121c93"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_VOLUME_PAGE = 200
 _TEST_TRANSPORT: httpx.BaseTransport | None = None
+_ADMIN_REQUEST_TIMEOUT = 8.0
 _ADMIN_READ_SESSION_TTL = 60.0
 _ADMIN_READ_SESSION_LIMIT = 32
 _ADMIN_READ_SESSIONS: OrderedDict[tuple, "_AdminReadSession"] = OrderedDict()
@@ -480,7 +481,7 @@ class AdminClient:
             verify=True,
             trust_env=False,
             follow_redirects=False,
-            timeout=8.0,
+            timeout=_ADMIN_REQUEST_TIMEOUT,
             transport=_TEST_TRANSPORT,
         )
 
@@ -531,11 +532,10 @@ class AdminClient:
     @contextmanager
     def _read_session_lock(self, session: _AdminReadSession):
         deadline = getattr(self, "_deadline_monotonic", None)
-        if deadline is None:
-            acquired = session.lock.acquire()
-        else:
-            remaining = deadline - time.monotonic()
-            acquired = remaining > 0 and session.lock.acquire(timeout=remaining)
+        remaining = _ADMIN_REQUEST_TIMEOUT
+        if deadline is not None:
+            remaining = min(remaining, deadline - time.monotonic())
+        acquired = remaining > 0 and session.lock.acquire(timeout=remaining)
         if not acquired:
             raise AppError("ADMIN_TIMEOUT", "Admin request budget expired.", 504)
         try:
@@ -631,7 +631,7 @@ class AdminClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise AppError("ADMIN_TIMEOUT", "Admin request budget expired.", 504)
-            timeout = kwargs.get("timeout", 8.0)
+            timeout = kwargs.get("timeout", _ADMIN_REQUEST_TIMEOUT)
             kwargs["timeout"] = min(timeout, remaining) if isinstance(timeout, (float, int)) else remaining
         try:
             with self._client.stream(method, request_path, **kwargs) as response:
