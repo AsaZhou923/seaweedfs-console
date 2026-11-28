@@ -584,9 +584,12 @@ class AdminClient:
                 raise
             # Only this allowlisted read is retried after stale authentication.
             return self._cached_read(path, params, raw, retry_auth=False, rotations_left=rotations_left)
-        with self._read_session_lock(session):
-            if generation == session.generation:
-                session.cookies = [copy.copy(cookie) for cookie in self._client.cookies.jar]
+        if session.lock.acquire(blocking=False):
+            try:
+                if generation == session.generation:
+                    session.cookies = [copy.copy(cookie) for cookie in self._client.cookies.jar]
+            finally:
+                session.lock.release()
         return result
 
     def _request_json(self, method: str, path: str, json_body: dict[str, Any] | None, params: dict[str, Any] | None, raw: bool) -> Any:

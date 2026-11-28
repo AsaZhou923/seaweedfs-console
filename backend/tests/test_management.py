@@ -431,6 +431,52 @@ def test_normal_volume_read_times_out_behind_cold_login_without_dispatch(read_se
     assert sum(request.url.path == "/api/volumes/export" for request in admin.session_requests) == 1
 
 
+def test_successful_read_returns_while_session_refresh_holds_cookie_lock(read_sessions, monkeypatch):
+    client, settings, csrf, admin = read_sessions
+    connection = create_connection(client, csrf)
+    armed = threading.Event()
+    read_entered, read_release = threading.Event(), threading.Event()
+    login_entered, login_release = threading.Event(), threading.Event()
+
+    def transport(request):
+        if armed.is_set():
+            if request.url.path == "/api/admin" and not read_entered.is_set():
+                read_entered.set()
+                assert read_release.wait(5)
+            if request.url.path == "/login" and request.method == "GET":
+                login_entered.set()
+                assert login_release.wait(5)
+        return admin(request)
+
+    monkeypatch.setattr(management, "_TEST_TRANSPORT", httpx.MockTransport(transport))
+    assert client.get(f"/api/v1/management/{connection['id']}/overview").status_code == 200
+    entry = next(iter(management._ADMIN_READ_SESSIONS.values()))
+    monkeypatch.setattr(management, "_ADMIN_REQUEST_TIMEOUT", .1)
+    armed.set()
+
+    def read():
+        with db.connect(settings) as conn:
+            with management.admin_client(settings, conn, connection["id"], reuse_read_session=True) as upstream:
+                return upstream.get_json("/api/admin")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        warm = pool.submit(read)
+        try:
+            assert read_entered.wait(2)
+            entry.expires_at = 0
+            refresh = pool.submit(read)
+            assert login_entered.wait(2)
+            read_release.set()
+            assert warm.result(timeout=2)["username"] == "admin"
+            assert not refresh.done(), "refresh must still hold the session lock"
+        finally:
+            read_release.set()
+            login_release.set()
+        assert refresh.result(timeout=2)["username"] == "admin"
+    assert admin.handshakes == 2
+    assert {cookie.value for cookie in entry.cookies if cookie.name == "sid"} == {"session-2"}
+
+
 def test_projection_continuous_credential_rotation_fails_with_bounded_typed_error(read_sessions, monkeypatch):
     client, settings, csrf, admin = read_sessions
     connection = create_connection(client, csrf)
